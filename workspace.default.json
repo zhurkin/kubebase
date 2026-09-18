@@ -1,21 +1,4 @@
 {
-  "schema": "kubebase.cluster",
-  "schemaVersion": 1,
-
-  "name": "",
-
-  "toolPlatforms": [],
-
-  "tools": {},
-
-  "environments": {},
-
-  "accessProfiles": {},
-
-  "users": {}
-}
-root@ievinnik:/home/icce/kuber/kubebase# cat workspace.default.json
-{
   "schema": "kubebase.workspace",
   "schemaVersion": 1,
 
