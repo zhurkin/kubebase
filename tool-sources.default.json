@@ -1,0 +1,143 @@
+{
+  "schema": "kubebase.toolSources",
+  "schemaVersion": 1,
+
+  "defaults": {
+    "auth": {
+      "type": "none"
+    }
+  },
+
+  "sources": {
+    "kubectl": {
+      "probeUrl": "https://dl.k8s.io/",
+
+      "platforms": {
+        "linux-amd64": {
+          "artifact": {
+            "url": "https://dl.k8s.io/release/v{version}/bin/linux/amd64/kubectl",
+            "type": "binary",
+            "binary": "kubectl"
+          },
+
+          "checksum": {
+            "url": "https://dl.k8s.io/release/v{version}/bin/linux/amd64/kubectl.sha256",
+            "type": "sha256-raw"
+          }
+        },
+
+        "windows-amd64": {
+          "artifact": {
+            "url": "https://dl.k8s.io/release/v{version}/bin/windows/amd64/kubectl.exe",
+            "type": "binary",
+            "binary": "kubectl.exe"
+          },
+
+          "checksum": {
+            "url": "https://dl.k8s.io/release/v{version}/bin/windows/amd64/kubectl.exe.sha256",
+            "type": "sha256-raw"
+          }
+        }
+      }
+    },
+
+
+    "helm": {
+      "probeUrl": "https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz",
+
+      "platforms": {
+        "linux-amd64": {
+          "artifact": {
+            "url": "https://get.helm.sh/helm-v{version}-linux-amd64.tar.gz",
+            "type": "tar.gz",
+            "binary": "linux-amd64/helm"
+          },
+
+          "checksum": {
+            "url": "https://get.helm.sh/helm-v{version}-linux-amd64.tar.gz.sha256sum",
+            "type": "sha256sum"
+          }
+        },
+
+        "windows-amd64": {
+          "artifact": {
+            "url": "https://get.helm.sh/helm-v{version}-windows-amd64.zip",
+            "type": "zip",
+            "binary": "windows-amd64/helm.exe"
+          },
+
+          "checksum": {
+            "url": "https://get.helm.sh/helm-v{version}-windows-amd64.zip.sha256sum",
+            "type": "sha256sum"
+          }
+        }
+      }
+    },
+
+
+    "k9s": {
+      "probeUrl": "https://github.com/derailed/k9s/releases",
+
+      "platforms": {
+        "linux-amd64": {
+          "artifact": {
+            "url": "https://github.com/derailed/k9s/releases/download/v{version}/k9s_Linux_amd64.tar.gz",
+            "type": "tar.gz",
+            "binary": "k9s"
+          },
+
+          "checksum": {
+            "url": "https://github.com/derailed/k9s/releases/download/v{version}/checksums.sha256",
+            "type": "sha256sum-list"
+          }
+        },
+
+        "windows-amd64": {
+          "artifact": {
+            "url": "https://github.com/derailed/k9s/releases/download/v{version}/k9s_Windows_amd64.zip",
+            "type": "zip",
+            "binary": "k9s.exe"
+          },
+
+          "checksum": {
+            "url": "https://github.com/derailed/k9s/releases/download/v{version}/checksums.sha256",
+            "type": "sha256sum-list"
+          }
+        }
+      }
+    },
+
+
+    "krew": {
+      "probeUrl": "https://github.com/kubernetes-sigs/krew/releases",
+
+      "platforms": {
+        "linux-amd64": {
+          "artifact": {
+            "url": "https://github.com/kubernetes-sigs/krew/releases/download/v{version}/krew-linux_amd64.tar.gz",
+            "type": "tar.gz",
+            "binary": "krew-linux_amd64"
+          },
+
+          "checksum": {
+            "url": "https://github.com/kubernetes-sigs/krew/releases/download/v{version}/krew-linux_amd64.tar.gz.sha256",
+            "type": "sha256-raw"
+          }
+        },
+
+        "windows-amd64": {
+          "artifact": {
+            "url": "https://github.com/kubernetes-sigs/krew/releases/download/v{version}/krew-windows_amd64.tar.gz",
+            "type": "tar.gz",
+            "binary": "krew-windows_amd64.exe"
+          },
+
+          "checksum": {
+            "url": "https://github.com/kubernetes-sigs/krew/releases/download/v{version}/krew-windows_amd64.tar.gz.sha256",
+            "type": "sha256-raw"
+          }
+        }
+      }
+    }
+  }
+}
