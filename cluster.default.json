@@ -1,0 +1,16 @@
+{
+  "schema": "kubebase.cluster",
+  "schemaVersion": 1,
+
+  "name": "",
+
+  "toolPlatforms": [],
+
+  "tools": {},
+
+  "environments": {},
+
+  "accessProfiles": {},
+
+  "users": {}
+}
