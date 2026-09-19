@@ -52,6 +52,7 @@ WORKSPACE_ROOT="$DEFAULT_WORKSPACE_ROOT"
 QUIET=0
 
 VALIDATION_ERRORS=0
+VALIDATION_WARNINGS=0
 CONFIG_FILE_COUNT=0
 CLUSTER_COUNT=0
 
@@ -74,6 +75,16 @@ validation_error()
 {
     echo "ERROR: $*" >&2
     VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+}
+
+
+validation_warning()
+{
+    if [ "$QUIET" -eq 0 ]; then
+        echo "WARNING: $*" >&2
+    fi
+
+    VALIDATION_WARNINGS=$((VALIDATION_WARNINGS + 1))
 }
 
 
@@ -171,42 +182,6 @@ validate_cluster_structure()
 
         and
 
-        (.environments | type) == "object"
-        and
-        all(
-            (.environments | to_entries[]);
-
-            (.key | safe_name)
-            and
-            (.value | type) == "object"
-            and
-            (.value.namespace | nonempty_string)
-        )
-
-        and
-
-        (.accessProfiles | type) == "object"
-        and
-        all(
-            (.accessProfiles | to_entries[]);
-
-            (.key | safe_name)
-            and
-            (.value | type) == "object"
-            and
-            (.value.environments | type) == "array"
-            and
-            all(.value.environments[]; nonempty_string)
-            and
-            (
-                (.value.environments | length)
-                ==
-                (.value.environments | unique | length)
-            )
-        )
-
-        and
-
         (.users | type) == "object"
         and
         all(
@@ -225,191 +200,37 @@ validate_cluster_structure()
                 or
                 (.value.context | nonempty_string)
             )
-
-            and
-
-            (.value.access | type) == "object"
-
-            and
-
-            (.value.access.profiles | type) == "array"
-            and
-            all(.value.access.profiles[]; nonempty_string)
-            and
-            (
-                (.value.access.profiles | length)
-                ==
-                (.value.access.profiles | unique | length)
-            )
-
-            and
-
-            (.value.access.environments | type) == "array"
-            and
-            all(.value.access.environments[]; nonempty_string)
-            and
-            (
-                (.value.access.environments | length)
-                ==
-                (.value.access.environments | unique | length)
-            )
         )
 
     ' "$file" >/dev/null 2>&1
 }
 
 
-validate_cluster_references()
+warn_deprecated_cluster_fields()
 {
     local file="$1"
+    local deprecated
 
-    local profile
-    local environment
-    local user
-
-
-    # --------------------------------------------------------------
-    # accessProfiles -> environments
-    # --------------------------------------------------------------
-
-    while IFS=$'\t' read -r profile environment; do
-
-        [ -n "$profile" ] || continue
-
-        validation_error \
-            "$file: accessProfiles.$profile references unknown environment '$environment'"
-
-    done < <(
+    deprecated="$(
         jq -r '
-
-            . as $cluster
-
-            |
-
-            .accessProfiles
-            | to_entries[]
-
-            |
-
-            .key as $profile
-
-            |
-
-            .value.environments[] as $environment
-
-            |
-
-            select(
-                ($cluster.environments | has($environment))
-                | not
-            )
-
-            |
-
             [
-                $profile,
-                $environment
+                (if has("environments") then "environments" else empty end),
+                (if has("accessProfiles") then "accessProfiles" else empty end),
+                (
+                    if any(.users[]?; (.access? | type) == "object")
+                    then "users.*.access"
+                    else empty
+                    end
+                )
             ]
-            | @tsv
-
+            | join(", ")
         ' "$file"
-    )
+    )"
 
-
-    # --------------------------------------------------------------
-    # users -> accessProfiles
-    # --------------------------------------------------------------
-
-    while IFS=$'\t' read -r user profile; do
-
-        [ -n "$user" ] || continue
-
-        validation_error \
-            "$file: users.$user references unknown access profile '$profile'"
-
-    done < <(
-        jq -r '
-
-            . as $cluster
-
-            |
-
-            .users
-            | to_entries[]
-
-            |
-
-            .key as $user
-
-            |
-
-            .value.access.profiles[] as $profile
-
-            |
-
-            select(
-                ($cluster.accessProfiles | has($profile))
-                | not
-            )
-
-            |
-
-            [
-                $user,
-                $profile
-            ]
-            | @tsv
-
-        ' "$file"
-    )
-
-
-    # --------------------------------------------------------------
-    # users -> environments
-    # --------------------------------------------------------------
-
-    while IFS=$'\t' read -r user environment; do
-
-        [ -n "$user" ] || continue
-
-        validation_error \
-            "$file: users.$user references unknown environment '$environment'"
-
-    done < <(
-        jq -r '
-
-            . as $cluster
-
-            |
-
-            .users
-            | to_entries[]
-
-            |
-
-            .key as $user
-
-            |
-
-            .value.access.environments[] as $environment
-
-            |
-
-            select(
-                ($cluster.environments | has($environment))
-                | not
-            )
-
-            |
-
-            [
-                $user,
-                $environment
-            ]
-            | @tsv
-
-        ' "$file"
-    )
+    if [ -n "$deprecated" ]; then
+        validation_warning \
+            "$file: deprecated cluster fields are ignored by KubeBase: $deprecated"
+    fi
 }
 
 
@@ -718,7 +539,7 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
             CLUSTER_COUNT=$((CLUSTER_COUNT + 1))
 
 
-            validate_cluster_references "$CONFIG_FILE"
+            warn_deprecated_cluster_fields "$CONFIG_FILE"
             ;;
 
 
@@ -826,6 +647,11 @@ if [ "$QUIET" -eq 0 ]; then
 
     fi
 
+
+    if [ "$VALIDATION_WARNINGS" -ne 0 ]; then
+        echo
+        echo "Warnings: $VALIDATION_WARNINGS"
+    fi
 
     echo
     echo "Configuration valid."
