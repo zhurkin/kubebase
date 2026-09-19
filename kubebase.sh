@@ -87,14 +87,18 @@ Commands:
       Install verified artifacts into the shared tool store.
 
   materialize-clusters
-      Materialize configured clusters, host toolchains, users and
-      environments inside the workspace.
+      Materialize configured clusters, host toolchains and users inside
+      the workspace.
 
   validate-users
       Validate materialized users and kubeconfig files locally.
 
+  validate-live
+      Validate configured profiles against the live Kubernetes API and
+      refresh namespace discovery cache.
+
   validate-environments
-      Validate configured environments against the Kubernetes API.
+      Compatibility alias for validate-live.
 
   profiles
       List configured cluster/user profiles and local readiness.
@@ -106,7 +110,7 @@ Commands:
       Activate a profile in the current shell (requires shell-init).
 
   current
-      Show the currently active KubeBase profile and namespace/project scope.
+      Show the currently active KubeBase profile and namespace/project navigation.
 
   namespaces
       Discover namespaces visible to the active profile (live by default,
@@ -145,6 +149,8 @@ Examples:
   $(basename "$0") materialize-clusters
 
   $(basename "$0") validate-users
+
+  $(basename "$0") validate-live
 
   $(basename "$0") profiles
 
@@ -242,12 +248,12 @@ case "$COMMAND" in
         ;;
 
 
-    validate-environments|validate-envs)
+    validate-live|validate-environments|validate-envs)
 
         shift
 
         exec \
-            "$SCRIPTS_DIR/60-validate-environments.sh" \
+            "$SCRIPTS_DIR/60-validate-live.sh" \
             "$@"
         ;;
 
@@ -301,7 +307,7 @@ case "$COMMAND" in
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
+            "$SCRIPTS_DIR/80-navigation.sh" \
             namespaces \
             "$@"
         ;;
@@ -312,7 +318,7 @@ case "$COMMAND" in
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
+            "$SCRIPTS_DIR/80-navigation.sh" \
             ns-direct \
             "$@"
         ;;
@@ -323,7 +329,7 @@ case "$COMMAND" in
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
+            "$SCRIPTS_DIR/80-navigation.sh" \
             projects \
             "$@"
         ;;
@@ -334,7 +340,7 @@ case "$COMMAND" in
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
+            "$SCRIPTS_DIR/80-navigation.sh" \
             project-direct \
             "$@"
         ;;
@@ -384,24 +390,24 @@ case "$COMMAND" in
         ;;
 
 
-    __scope-ns)
+    __nav-ns)
 
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
-            __scope-ns \
+            "$SCRIPTS_DIR/80-navigation.sh" \
+            __nav-ns \
             "$@"
         ;;
 
 
-    __scope-project)
+    __nav-project)
 
         shift
 
         exec \
-            "$SCRIPTS_DIR/80-scope.sh" \
-            __scope-project \
+            "$SCRIPTS_DIR/80-navigation.sh" \
+            __nav-project \
             "$@"
         ;;
 
