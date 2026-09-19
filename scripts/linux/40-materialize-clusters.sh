@@ -63,7 +63,8 @@ EXISTING_LINKS=0
 
 CLUSTER_COUNT=0
 USER_COUNT=0
-ENVIRONMENT_COUNT=0
+LEGACY_ENV_DIRS_REMOVED=0
+LEGACY_ENV_DIRS_RETAINED=0
 
 TOOLCHAIN_COUNT=0
 TOOLCHAIN_SKIPPED=0
@@ -151,6 +152,39 @@ ensure_directory()
     mkdir -- "$path"
 
     CREATED_DIRS=$((CREATED_DIRS + 1))
+}
+
+
+cleanup_legacy_environment_tree()
+{
+    local path="$1"
+
+    if [ -L "$path" ]; then
+        echo "WARNING: retaining legacy environments path because it is a symlink: $path" >&2
+        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
+        return 0
+    fi
+
+    if [ ! -e "$path" ]; then
+        return 0
+    fi
+
+    if [ ! -d "$path" ]; then
+        echo "WARNING: retaining legacy environments path because it is not a directory: $path" >&2
+        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
+        return 0
+    fi
+
+    # Remove only empty directories. Any file, symlink, or non-empty
+    # directory causes the remaining legacy tree to be retained.
+    find "$path" -depth -type d -empty -delete 2>/dev/null || true
+
+    if [ -e "$path" ]; then
+        echo "WARNING: retaining non-empty legacy environments tree: $path" >&2
+        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
+    else
+        LEGACY_ENV_DIRS_REMOVED=$((LEGACY_ENV_DIRS_REMOVED + 1))
+    fi
 }
 
 
@@ -1047,12 +1081,13 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
 
     CLUSTER_DIR="$CLUSTERS_DIR/$CLUSTER_NAME"
     USERS_DIR="$CLUSTER_DIR/users"
-    ENVIRONMENTS_DIR="$CLUSTER_DIR/environments"
+    LEGACY_ENVIRONMENTS_DIR="$CLUSTER_DIR/environments"
 
 
     ensure_directory "$CLUSTER_DIR"
     ensure_directory "$USERS_DIR"
-    ensure_directory "$ENVIRONMENTS_DIR"
+
+    cleanup_legacy_environment_tree "$LEGACY_ENVIRONMENTS_DIR"
 
 
     # ------------------------------------------------------------------
@@ -1115,29 +1150,6 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
     )
 
 
-    # ------------------------------------------------------------------
-    # Environments
-    # ------------------------------------------------------------------
-
-    while IFS= read -r ENVIRONMENT_NAME; do
-
-        [ -n "$ENVIRONMENT_NAME" ] || continue
-
-
-        ENVIRONMENT_COUNT=$((ENVIRONMENT_COUNT + 1))
-
-
-        ENVIRONMENT_DIR="$ENVIRONMENTS_DIR/$ENVIRONMENT_NAME"
-
-
-        ensure_directory "$ENVIRONMENT_DIR"
-
-    done < <(
-        jq -r '
-            .environments
-            | keys[]
-        ' "$CONFIG_FILE"
-    )
 
 done
 
@@ -1156,9 +1168,8 @@ echo "Platform   : $HOST_PLATFORM"
 
 echo
 echo "Definitions:"
-echo "  clusters     : $CLUSTER_COUNT"
-echo "  users        : $USER_COUNT"
-echo "  environments : $ENVIRONMENT_COUNT"
+echo "  clusters : $CLUSTER_COUNT"
+echo "  users    : $USER_COUNT"
 
 echo
 echo "Toolchains:"
@@ -1176,6 +1187,11 @@ echo "  existing dirs  : $EXISTING_DIRS"
 echo "  created links  : $CREATED_LINKS"
 echo "  updated links  : $UPDATED_LINKS"
 echo "  existing links : $EXISTING_LINKS"
+
+echo
+echo "Legacy cleanup:"
+echo "  environment trees removed  : $LEGACY_ENV_DIRS_REMOVED"
+echo "  environment trees retained : $LEGACY_ENV_DIRS_RETAINED"
 
 echo
 
