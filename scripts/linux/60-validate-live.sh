@@ -60,6 +60,7 @@ PROFILES=0
 API_READY=0
 INVENTORY_COMPLETE_COUNT=0
 INVENTORY_BEST_EFFORT_COUNT=0
+INVENTORY_UNAVAILABLE_COUNT=0
 FAILED=0
 WARNINGS=0
 ERRORS=0
@@ -340,6 +341,8 @@ discover_namespace_inventory()
     DISCOVERY_COMPLETE="false"
     DISCOVERY_NOTE=""
     DISCOVERY_ERROR=""
+    DISCOVERY_API_READY="false"
+    DISCOVERY_LIST_ERROR=""
 
     : > "$list_error_file"
 
@@ -368,8 +371,20 @@ discover_namespace_inventory()
         )"
         DISCOVERY_METHOD="namespace-list"
         DISCOVERY_COMPLETE="true"
+        DISCOVERY_API_READY="true"
         return 0
     fi
+
+    DISCOVERY_LIST_ERROR="$(first_nonempty_line "$list_error_file")"
+
+    # A Forbidden response from the API is still positive evidence that the
+    # endpoint is reachable and the presented identity was authenticated.
+    # It must not be treated as an API/authentication failure.
+    case "$DISCOVERY_LIST_ERROR" in
+        *Forbidden*|*forbidden*)
+            DISCOVERY_API_READY="true"
+            ;;
+    esac
 
     request_namespace="$(
         "$kubectl_bin" \
@@ -655,29 +670,18 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         echo "  context    : $SELECTED_CONTEXT"
         echo "  selection  : $CONTEXT_SELECTION"
 
-        API_ERROR_FILE="$TEMP_DIR/api-error.$$"
-        : > "$API_ERROR_FILE"
-
-        # Use the core API discovery endpoint as the readiness/authentication
-        # probe. Restricted Rancher profiles may legitimately have access to
-        # /api and /apis while /version is denied as a non-resource URL.
-        # Therefore /version is informational only and must not decide whether
-        # a profile is usable.
-        if API_DISCOVERY_JSON="$(
+        # Namespace discovery itself is the live API/authentication probe.
+        # This avoids relying on non-resource endpoints such as /version or
+        # /api, which Rancher or Kubernetes RBAC may deny even when normal
+        # namespaced API access is fully usable.
+        if discover_namespace_inventory \
             "$KUBECTL_BIN" \
-                --kubeconfig "$KUBECONFIG_FILE" \
-                --context "$SELECTED_CONTEXT" \
-                --request-timeout="$REQUEST_TIMEOUT" \
-                get --raw=/api \
-                2>"$API_ERROR_FILE"
-        )"
+            "$KUBECONFIG_FILE" \
+            "$SELECTED_CONTEXT" \
+            "$CLUSTER_NAME" \
+            "$USER_NAME"
         then
             API_READY=$((API_READY + 1))
-
-            API_CORE_VERSIONS="$(
-                jq -r '(.versions // []) | join(",")' \
-                    <<< "$API_DISCOVERY_JSON" 2>/dev/null || true
-            )"
 
             API_GIT_VERSION="$(
                 "$KUBECTL_BIN" \
@@ -691,27 +695,11 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
             if [ -n "$API_GIT_VERSION" ]; then
                 echo "  api        : OK ($API_GIT_VERSION)"
-            elif [ -n "$API_CORE_VERSIONS" ]; then
-                echo "  api        : OK (core discovery: $API_CORE_VERSIONS)"
+            elif [ "$DISCOVERY_METHOD" = "namespace-list" ]; then
+                echo "  api        : OK (namespace API)"
             else
-                echo "  api        : OK"
+                echo "  api        : OK (authorization review)"
             fi
-        else
-            API_ERROR="$(first_nonempty_line "$API_ERROR_FILE")"
-            record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API discovery failed: $API_ERROR"
-            FAILED=$((FAILED + 1))
-            echo "  api        : FAILED"
-            echo "  status     : FAILED"
-            continue
-        fi
-
-        if discover_namespace_inventory \
-            "$KUBECTL_BIN" \
-            "$KUBECONFIG_FILE" \
-            "$SELECTED_CONTEXT" \
-            "$CLUSTER_NAME" \
-            "$USER_NAME"
-        then
             CACHE_FILE="$(
                 write_inventory_cache \
                     "$WORKSPACE_DIR" \
@@ -744,9 +732,21 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
             echo "  status     : READY"
         else
-            record_warning "profile '$CLUSTER_NAME/$USER_NAME': namespace discovery unavailable: $DISCOVERY_ERROR"
-            echo "  discovery  : unavailable"
-            echo "  status     : PARTIAL"
+            if [ "$DISCOVERY_API_READY" = "true" ]; then
+                API_READY=$((API_READY + 1))
+                INVENTORY_UNAVAILABLE_COUNT=$((INVENTORY_UNAVAILABLE_COUNT + 1))
+                record_warning "profile '$CLUSTER_NAME/$USER_NAME': namespace discovery unavailable: $DISCOVERY_ERROR"
+                echo "  api        : OK (authenticated; namespace inventory unavailable)"
+                echo "  discovery  : unavailable"
+                echo "  inventory  : unavailable"
+                echo "  status     : PARTIAL"
+            else
+                record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API/authentication failed: $DISCOVERY_ERROR"
+                FAILED=$((FAILED + 1))
+                echo "  api        : FAILED"
+                echo "  discovery  : unavailable"
+                echo "  status     : FAILED"
+            fi
         fi
     done
 done
@@ -764,6 +764,7 @@ echo "  profiles              : $PROFILES"
 echo "  API ready             : $API_READY"
 echo "  inventory complete    : $INVENTORY_COMPLETE_COUNT"
 echo "  inventory best effort : $INVENTORY_BEST_EFFORT_COUNT"
+echo "  inventory unavailable : $INVENTORY_UNAVAILABLE_COUNT"
 echo "  failed                : $FAILED"
 echo "  warnings              : $WARNINGS"
 echo "  errors                : $ERRORS"
