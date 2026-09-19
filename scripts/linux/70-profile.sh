@@ -246,6 +246,14 @@ shell_export()
 }
 
 
+shell_unset()
+{
+    local name="$1"
+
+    printf 'unset %s\n' "$name"
+}
+
+
 # ----------------------------------------------------------------------
 # Common option parsing
 # ----------------------------------------------------------------------
@@ -942,6 +950,7 @@ create_profile_session()
         --arg user "$PROFILE_USER_NAME" \
         --arg context "$PROFILE_CONTEXT" \
         --arg contextSelection "$PROFILE_CONTEXT_SELECTION" \
+        --arg contextNamespace "$PROFILE_CONTEXT_NAMESPACE" \
         --arg platform "$HOST_PLATFORM" \
         --arg sourceKubeconfig "$PROFILE_SOURCE_KUBECONFIG" \
         --arg effectiveKubeconfig "$effective_kubeconfig" \
@@ -960,6 +969,12 @@ create_profile_session()
             kubeconfig: {
                 source: $sourceKubeconfig,
                 effective: $effectiveKubeconfig
+            },
+            scope: {
+                type: (if $contextNamespace == "" then "cluster" else "namespace" end),
+                projectFilter: null,
+                namespace: (if $contextNamespace == "" then null else $contextNamespace end),
+                namespaceProject: null
             },
             toolchain: $toolchain
         }
@@ -1189,6 +1204,16 @@ command_emit_use()
     shell_export "KUBEBASE_SOURCE_KUBECONFIG" "$PROFILE_SOURCE_KUBECONFIG"
     shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
     shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
+
+    shell_unset "KUBEBASE_PROJECT"
+    shell_unset "KUBEBASE_NAMESPACE_PROJECT"
+
+    if [ -n "$PROFILE_CONTEXT_NAMESPACE" ]; then
+        shell_export "KUBEBASE_NAMESPACE" "$PROFILE_CONTEXT_NAMESPACE"
+    else
+        shell_unset "KUBEBASE_NAMESPACE"
+    fi
+
     shell_export "KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
 }
 
@@ -1233,6 +1258,22 @@ command_current()
                 ][0] // ""
             ' 2>/dev/null || true
         )"
+    fi
+
+    if [ -n "$namespace" ]; then
+        echo "Scope     : namespace"
+    elif [ -n "${KUBEBASE_PROJECT:-}" ]; then
+        echo "Scope     : project"
+    else
+        echo "Scope     : cluster"
+    fi
+
+    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
+        echo "Project   : $KUBEBASE_PROJECT (filter)"
+    elif [ -n "${KUBEBASE_NAMESPACE_PROJECT:-}" ]; then
+        echo "Project   : $KUBEBASE_NAMESPACE_PROJECT (namespace)"
+    else
+        echo "Project   : (none)"
     fi
 
     if [ -n "$namespace" ]; then
@@ -1392,6 +1433,64 @@ kubebase()
             "$KUBEBASE_ENTRYPOINT" current
             ;;
 
+        ns)
+            shift || true
+
+            if [ "$#" -gt 1 ]; then
+                echo "ERROR: usage: kubebase ns [NAME|--clear]" >&2
+                return 2
+            fi
+
+            __kb_code="$(
+                "$KUBEBASE_ENTRYPOINT" \
+                    __scope-ns \
+                    "${1:-}"
+            )"
+            __kb_status=$?
+
+            if [ "$__kb_status" -ne 0 ]; then
+                return "$__kb_status"
+            fi
+
+            if ! eval "$__kb_code"; then
+                echo "ERROR: failed to update KubeBase namespace state" >&2
+                return 1
+            fi
+
+            "$KUBEBASE_ENTRYPOINT" current
+            ;;
+
+        project)
+            shift || true
+
+            if [ "$#" -gt 1 ]; then
+                echo "ERROR: usage: kubebase project [PROJECT|--clear]" >&2
+                return 2
+            fi
+
+            __kb_code="$(
+                "$KUBEBASE_ENTRYPOINT" \
+                    __scope-project \
+                    "${1:-}"
+            )"
+            __kb_status=$?
+
+            if [ "$__kb_status" -ne 0 ]; then
+                return "$__kb_status"
+            fi
+
+            if ! eval "$__kb_code"; then
+                echo "ERROR: failed to update KubeBase project state" >&2
+                return 1
+            fi
+
+            "$KUBEBASE_ENTRYPOINT" current
+            ;;
+
+        namespaces|projects)
+            "$KUBEBASE_ENTRYPOINT" "$@"
+            ;;
+
         off)
             shift || true
 
@@ -1429,6 +1528,9 @@ kubebase()
             unset KUBEBASE_SOURCE_KUBECONFIG
             unset KUBEBASE_EFFECTIVE_KUBECONFIG
             unset KUBEBASE_SESSION_DIR
+            unset KUBEBASE_PROJECT
+            unset KUBEBASE_NAMESPACE
+            unset KUBEBASE_NAMESPACE_PROJECT
 
             if [ -n "$__kb_old_session" ]; then
                 if ! "$KUBEBASE_ENTRYPOINT" \
