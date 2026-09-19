@@ -12,9 +12,9 @@ set -euo pipefail
 #
 #   cluster + user
 #
-# Scope (cluster/project/namespace) is intentionally not implemented
-# here. Step 70 only activates the connection identity and the cluster
-# toolchain. Scope will be layered on top later.
+# Namespace/project navigation is layered on top by Step 80. Step 70
+# owns only the connection identity, kubeconfig selection and cluster
+# toolchain.
 # ----------------------------------------------------------------------
 
 PROJECT_NAME="KubeBase"
@@ -970,8 +970,7 @@ create_profile_session()
                 source: $sourceKubeconfig,
                 effective: $effectiveKubeconfig
             },
-            scope: {
-                type: (if $contextNamespace == "" then "cluster" else "namespace" end),
+            navigation: {
                 projectFilter: null,
                 namespace: (if $contextNamespace == "" then null else $contextNamespace end),
                 namespaceProject: null
@@ -1205,6 +1204,8 @@ command_emit_use()
     shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
     shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
 
+    # Compatibility cleanup for pre-convergence Step 80 shells.
+    shell_unset "KUBEBASE_SCOPE"
     shell_unset "KUBEBASE_PROJECT"
     shell_unset "KUBEBASE_NAMESPACE_PROJECT"
 
@@ -1260,14 +1261,6 @@ command_current()
         )"
     fi
 
-    if [ -n "$namespace" ]; then
-        echo "Scope     : namespace"
-    elif [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        echo "Scope     : project"
-    else
-        echo "Scope     : cluster"
-    fi
-
     if [ -n "${KUBEBASE_PROJECT:-}" ]; then
         echo "Project   : $KUBEBASE_PROJECT (filter)"
     elif [ -n "${KUBEBASE_NAMESPACE_PROJECT:-}" ]; then
@@ -1277,9 +1270,9 @@ command_current()
     fi
 
     if [ -n "$namespace" ]; then
-        echo "Kube ns   : $namespace"
+        echo "Namespace : $namespace"
     else
-        echo "Kube ns   : (default)"
+        echo "Namespace : (default)"
     fi
 
     echo
@@ -1443,7 +1436,7 @@ kubebase()
 
             __kb_code="$(
                 "$KUBEBASE_ENTRYPOINT" \
-                    __scope-ns \
+                    __nav-ns \
                     "${1:-}"
             )"
             __kb_status=$?
@@ -1453,7 +1446,7 @@ kubebase()
             fi
 
             if ! eval "$__kb_code"; then
-                echo "ERROR: failed to update KubeBase namespace state" >&2
+                echo "ERROR: failed to update KubeBase namespace navigation" >&2
                 return 1
             fi
 
@@ -1470,7 +1463,7 @@ kubebase()
 
             __kb_code="$(
                 "$KUBEBASE_ENTRYPOINT" \
-                    __scope-project \
+                    __nav-project \
                     "${1:-}"
             )"
             __kb_status=$?
@@ -1480,7 +1473,7 @@ kubebase()
             fi
 
             if ! eval "$__kb_code"; then
-                echo "ERROR: failed to update KubeBase project state" >&2
+                echo "ERROR: failed to update KubeBase project navigation" >&2
                 return 1
             fi
 
@@ -1528,6 +1521,7 @@ kubebase()
             unset KUBEBASE_SOURCE_KUBECONFIG
             unset KUBEBASE_EFFECTIVE_KUBECONFIG
             unset KUBEBASE_SESSION_DIR
+            unset KUBEBASE_SCOPE
             unset KUBEBASE_PROJECT
             unset KUBEBASE_NAMESPACE
             unset KUBEBASE_NAMESPACE_PROJECT
