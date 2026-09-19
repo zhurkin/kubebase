@@ -923,7 +923,6 @@ WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 
 ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
 TOOLS_DIR="$WORKSPACE_DIR/tools"
-RUNTIME_DIR="$WORKSPACE_DIR/runtime"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
@@ -937,10 +936,6 @@ RUNTIME_DIR="$WORKSPACE_DIR/runtime"
 [ -d "$TOOLS_DIR" ] || \
     fail \
         "tools directory not found: $TOOLS_DIR"
-
-[ -d "$RUNTIME_DIR" ] || \
-    fail \
-        "runtime directory not found: $RUNTIME_DIR"
 
 
 # ----------------------------------------------------------------------
