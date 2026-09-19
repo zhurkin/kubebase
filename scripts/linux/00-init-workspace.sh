@@ -16,6 +16,7 @@ WORKSPACE_SCHEMA_VERSION=1
 
 DEFAULT_WORKSPACE_CONFIG_NAME="workspace.default.json"
 AUTO_WORKSPACE_CONFIG_NAME="workspace.json"
+WORKSPACE_ENTRYPOINT_NAME="kubebase.sh"
 
 
 # ----------------------------------------------------------------------
@@ -173,6 +174,100 @@ validate_effective_workspace()
 }
 
 
+workspace_entrypoint_target()
+{
+    local workspace_dir="$1"
+
+    local workspace_parent
+    local repo_parent
+    local repo_name
+
+    workspace_parent="$(dirname -- "$workspace_dir")"
+    repo_parent="$(dirname -- "$REPO_ROOT")"
+    repo_name="$(basename -- "$REPO_ROOT")"
+
+    # Prefer a relative sibling link for the normal portable layout.
+    # For an explicitly relocated workspace root, fall back to an
+    # absolute repository entrypoint. Re-running init repairs the link.
+
+    if [ "$workspace_parent" = "$repo_parent" ]; then
+
+        printf '../%s/%s\n' \
+            "$repo_name" \
+            "$WORKSPACE_ENTRYPOINT_NAME"
+
+    else
+
+        printf '%s/%s\n' \
+            "$REPO_ROOT" \
+            "$WORKSPACE_ENTRYPOINT_NAME"
+
+    fi
+}
+
+
+ensure_workspace_entrypoint()
+{
+    local workspace_dir="$1"
+
+    local link_path
+    local link_target
+    local current_target
+    local tmp_link
+
+    link_path="$workspace_dir/$WORKSPACE_ENTRYPOINT_NAME"
+    link_target="$(workspace_entrypoint_target "$workspace_dir")"
+
+
+    if [ -L "$link_path" ]; then
+
+        current_target="$(readlink -- "$link_path")"
+
+        if [ "$current_target" = "$link_target" ]; then
+
+            WORKSPACE_ENTRYPOINT_STATUS="existing"
+            WORKSPACE_ENTRYPOINT_TARGET="$link_target"
+
+            return 0
+        fi
+
+
+        tmp_link="$workspace_dir/.${WORKSPACE_ENTRYPOINT_NAME}.tmp.$$"
+
+        rm -f -- "$tmp_link"
+
+        ln -s \
+            -- "$link_target" \
+            "$tmp_link"
+
+        mv -Tf \
+            -- "$tmp_link" \
+            "$link_path"
+
+        WORKSPACE_ENTRYPOINT_STATUS="updated"
+        WORKSPACE_ENTRYPOINT_TARGET="$link_target"
+
+        return 0
+    fi
+
+
+    if [ -e "$link_path" ]; then
+
+        fail \
+            "refusing to overwrite non-symlink workspace entrypoint: $link_path"
+
+    fi
+
+
+    ln -s \
+        -- "$link_target" \
+        "$link_path"
+
+    WORKSPACE_ENTRYPOINT_STATUS="created"
+    WORKSPACE_ENTRYPOINT_TARGET="$link_target"
+}
+
+
 # ----------------------------------------------------------------------
 # Arguments
 # ----------------------------------------------------------------------
@@ -258,6 +353,11 @@ EOF
     exit 1
 
 fi
+
+
+[ -f "$REPO_ROOT/$WORKSPACE_ENTRYPOINT_NAME" ] || \
+    fail \
+        "repository entrypoint not found: $REPO_ROOT/$WORKSPACE_ENTRYPOINT_NAME"
 
 
 # ----------------------------------------------------------------------
@@ -585,6 +685,19 @@ fi
 
 
 # ----------------------------------------------------------------------
+# Workspace entrypoint
+#
+# workspace/kubebase.sh -> repository/kubebase.sh
+# ----------------------------------------------------------------------
+
+WORKSPACE_ENTRYPOINT_STATUS=""
+WORKSPACE_ENTRYPOINT_TARGET=""
+
+ensure_workspace_entrypoint \
+    "$WORKSPACE_DIR"
+
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 
@@ -618,6 +731,12 @@ if [ "$WORKSPACE_CREATED" -eq 1 ]; then
 else
     echo "Exists : $WORKSPACE_FILE"
 fi
+
+echo
+echo "Entrypoint:"
+echo "  link     : $WORKSPACE_DIR/$WORKSPACE_ENTRYPOINT_NAME"
+echo "  target   : $WORKSPACE_ENTRYPOINT_TARGET"
+echo "  status   : $WORKSPACE_ENTRYPOINT_STATUS"
 
 echo
 echo "Directories:"
