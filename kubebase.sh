@@ -96,6 +96,21 @@ Commands:
   validate-environments
       Validate configured environments against the Kubernetes API.
 
+  profiles
+      List configured cluster/user profiles and local readiness.
+
+  shell-init bash
+      Emit Bash integration for profile activation.
+
+  use [CLUSTER/USER]
+      Activate a profile in the current shell (requires shell-init).
+
+  current
+      Show the currently active KubeBase profile.
+
+  off
+      Deactivate the current profile (requires shell-init).
+
   help
       Show this help.
 
@@ -117,6 +132,16 @@ Examples:
   $(basename "$0") materialize-clusters
 
   $(basename "$0") validate-users
+
+  $(basename "$0") profiles
+
+  eval "\$(./kubebase.sh shell-init bash)"
+
+  kubebase use rancher-main/admin
+
+  kubebase current
+
+  kubebase off
 EOF_USAGE
 }
 
@@ -202,6 +227,94 @@ case "$COMMAND" in
 
         exec \
             "$SCRIPTS_DIR/60-validate-environments.sh" \
+            "$@"
+        ;;
+
+
+    profiles)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            profiles \
+            "$@"
+        ;;
+
+
+    shell-init)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            shell-init \
+            "$@"
+        ;;
+
+
+    use)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            use-direct \
+            "$@"
+        ;;
+
+
+    current)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            current \
+            "$@"
+        ;;
+
+
+    off)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            off-direct \
+            "$@"
+        ;;
+
+
+    __profile-select)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            __profile-select \
+            "$@"
+        ;;
+
+
+    __profile-use)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            __profile-use \
+            "$@"
+        ;;
+
+
+    __profile-cleanup)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/70-profile.sh" \
+            __profile-cleanup \
             "$@"
         ;;
 
