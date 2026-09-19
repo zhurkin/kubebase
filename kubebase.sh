@@ -106,7 +106,20 @@ Commands:
       Activate a profile in the current shell (requires shell-init).
 
   current
-      Show the currently active KubeBase profile.
+      Show the currently active KubeBase profile and namespace/project scope.
+
+  namespaces
+      Discover namespaces visible to the active profile (live by default,
+      cached fallback).
+
+  ns [NAME|--clear]
+      Select or clear the active Kubernetes namespace (requires shell-init).
+
+  projects
+      List Rancher project IDs discovered from namespace metadata.
+
+  project [PROJECT|--clear]
+      Select or clear the Rancher project navigation filter (requires shell-init).
 
   off
       Deactivate the current profile (requires shell-init).
@@ -140,6 +153,14 @@ Examples:
   kubebase use rancher-main/admin
 
   kubebase current
+
+  kubebase namespaces
+
+  kubebase ns stats-hydra-data
+
+  kubebase projects
+
+  kubebase project p-bmdmw
 
   kubebase off
 EOF_USAGE
@@ -275,6 +296,50 @@ case "$COMMAND" in
         ;;
 
 
+    namespaces)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            namespaces \
+            "$@"
+        ;;
+
+
+    ns)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            ns-direct \
+            "$@"
+        ;;
+
+
+    projects)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            projects \
+            "$@"
+        ;;
+
+
+    project)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            project-direct \
+            "$@"
+        ;;
+
+
     off)
 
         shift
@@ -315,6 +380,28 @@ case "$COMMAND" in
         exec \
             "$SCRIPTS_DIR/70-profile.sh" \
             __profile-cleanup \
+            "$@"
+        ;;
+
+
+    __scope-ns)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            __scope-ns \
+            "$@"
+        ;;
+
+
+    __scope-project)
+
+        shift
+
+        exec \
+            "$SCRIPTS_DIR/80-scope.sh" \
+            __scope-project \
             "$@"
         ;;
 
