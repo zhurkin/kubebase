@@ -5,8 +5,57 @@ set -eu
 
 PROJECT_NAME="KubeBase"
 
+
+# ----------------------------------------------------------------------
+# Resolve the real repository entrypoint.
+#
+# kubebase.sh may be invoked through the workspace symlink created by
+# Step 00. Resolve symlinks before deriving REPO_ROOT so all commands
+# continue to execute from the Git repository.
+# ----------------------------------------------------------------------
+
+SELF="$0"
+
+case "$SELF" in
+    /*)
+        ;;
+
+    *)
+        SELF="$(pwd -P)/$SELF"
+        ;;
+esac
+
+SYMLINK_DEPTH=0
+
+while [ -L "$SELF" ]; do
+
+    SYMLINK_DEPTH=$((SYMLINK_DEPTH + 1))
+
+    if [ "$SYMLINK_DEPTH" -gt 40 ]; then
+        echo "ERROR: too many kubebase.sh symlink levels" >&2
+        exit 1
+    fi
+
+    SELF_DIR=$(
+        CDPATH= cd -- "$(dirname -- "$SELF")"
+        pwd -P
+    )
+
+    SELF_TARGET=$(readlink -- "$SELF")
+
+    case "$SELF_TARGET" in
+        /*)
+            SELF="$SELF_TARGET"
+            ;;
+
+        *)
+            SELF="$SELF_DIR/$SELF_TARGET"
+            ;;
+    esac
+done
+
 REPO_ROOT=$(
-    CDPATH= cd -- "$(dirname -- "$0")"
+    CDPATH= cd -- "$(dirname -- "$SELF")"
     pwd -P
 )
 
@@ -38,8 +87,8 @@ Commands:
       Install verified artifacts into the shared tool store.
 
   materialize-clusters
-      Materialize configured clusters, users and environments
-      inside the workspace.
+      Materialize configured clusters, host toolchains, users and
+      environments inside the workspace.
 
   validate-users
       Validate materialized users and kubeconfig files locally.
