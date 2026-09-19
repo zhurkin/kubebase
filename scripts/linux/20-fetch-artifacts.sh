@@ -874,7 +874,6 @@ WORKSPACE_ROOT="$(
 WORKSPACE_DIR="$WORKSPACE_ROOT/$WORKSPACE_NAME"
 WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
-RUNTIME_DIR="$WORKSPACE_DIR/runtime"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
@@ -882,9 +881,6 @@ RUNTIME_DIR="$WORKSPACE_DIR/runtime"
 
 [ -d "$ARTIFACTS_DIR" ] || \
     fail "artifact directory not found: $ARTIFACTS_DIR"
-
-[ -d "$RUNTIME_DIR" ] || \
-    fail "runtime directory not found: $RUNTIME_DIR"
 
 
 # ----------------------------------------------------------------------
