@@ -350,7 +350,7 @@ live_discover_inventory()
     local namespace_json
     local list_error_file
     local list_error
-    local review_json
+    local review_text
     local review_error_file
     local review_error
     local request_namespace
@@ -420,26 +420,18 @@ live_discover_inventory()
 
     review_error_file="$(mktemp)"
 
-    if ! review_json="$(
-        printf '%s\n' "$(
-            jq -cn \
-                --arg namespace "$request_namespace" '
-                {
-                    apiVersion: "authorization.k8s.io/v1",
-                    kind: "SelfSubjectRulesReview",
-                    spec: {
-                        namespace: $namespace
-                    }
-                }
-            '
-        )" |
+    # Use kubectl's supported authorization command rather than constructing
+    # SelfSubjectRulesReview with `create --raw`. Rancher proxy endpoints can
+    # reject the raw POST even though `kubectl auth can-i --list` succeeds for
+    # the same kubeconfig and identity.
+    if ! review_text="$(
         "$KUBECTL_BIN" \
             --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
             --context "$KUBEBASE_CONTEXT" \
             --request-timeout="$REQUEST_TIMEOUT" \
-            create \
-            --raw /apis/authorization.k8s.io/v1/selfsubjectrulesreviews \
-            -f - \
+            auth can-i \
+            --list \
+            --namespace "$request_namespace" \
             2>"$review_error_file"
     )"
     then
@@ -452,22 +444,26 @@ live_discover_inventory()
 
     rm -f -- "$review_error_file"
 
+    # `kubectl auth can-i --list` renders a table. Extract Resource Names from
+    # rules whose resource column is exactly `namespaces`. Columns are
+    # separated by two or more spaces, while multiple resource names inside
+    # `[ ... ]` are separated by single spaces.
     mapfile -t candidates < <(
-        jq -r '
-            [
-                .status.resourceRules[]?
-                |
-                select(
-                    any(.apiGroups[]?; . == "")
-                    and
-                    any(.resources[]?; . == "namespaces")
-                )
-                |
-                .resourceNames[]?
-            ]
-            | unique
-            | .[]
-        ' <<< "$review_json"
+        awk -F '[[:space:]][[:space:]]+' '
+            $1 == "namespaces" && $3 ~ /^\[[^]]*\]$/ {
+                names = $3
+                sub(/^\[/, "", names)
+                sub(/\]$/, "", names)
+
+                count = split(names, parts, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    if (parts[i] != "" && parts[i] != "*") {
+                        print parts[i]
+                    }
+                }
+            }
+        ' <<< "$review_text" |
+        sort -u
     )
 
     entries_file="$(mktemp)"
@@ -515,13 +511,13 @@ live_discover_inventory()
     INVENTORY_JSON="$(
         normalized_inventory \
             "$entries_json" \
-            "rules-review" \
+            "auth-can-i" \
             false \
             "$timestamp"
     )"
 
     INVENTORY_SOURCE="live"
-    INVENTORY_METHOD="rules-review"
+    INVENTORY_METHOD="auth-can-i"
     INVENTORY_COMPLETE="false"
     INVENTORY_TIMESTAMP="$timestamp"
     INVENTORY_NOTE="namespace LIST is unavailable; inventory is best effort"
