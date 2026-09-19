@@ -223,20 +223,6 @@ file_mode()
 }
 
 
-join_json_array()
-{
-    local json="$1"
-
-    jq -r '
-        if length == 0 then
-            "(none)"
-        else
-            join(", ")
-        end
-    ' <<< "$json"
-}
-
-
 credential_summary()
 {
     local json="$1"
@@ -674,90 +660,8 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         )"
 
 
-        # --------------------------------------------------------------
-        # Declared access
-        # --------------------------------------------------------------
-
-        PROFILE_JSON="$(
-            jq -c \
-                --arg user "$USER_NAME" '
-                .users[$user].access.profiles // []
-            ' "$CLUSTER_FILE"
-        )"
-
-
-        EFFECTIVE_ENV_JSON="$(
-            jq -c \
-                --arg user "$USER_NAME" '
-
-                def ordered_unique:
-                    reduce .[] as $item
-                        (
-                            [];
-
-                            if index($item) == null then
-                                . + [$item]
-                            else
-                                .
-                            end
-                        );
-
-                . as $root
-
-                |
-
-                (
-                    [
-                        (
-                            $root.users[$user].access.profiles
-                            // []
-                        )[] as $profile
-
-                        |
-
-                        (
-                            $root.accessProfiles[$profile].environments
-                            // []
-                        )[]
-                    ]
-
-                    +
-
-                    (
-                        $root.users[$user].access.environments
-                        // []
-                    )
-                )
-
-                | ordered_unique
-
-            ' "$CLUSTER_FILE"
-        )"
-
-
-        NAMESPACE_JSON="$(
-            jq -c \
-                --argjson envs "$EFFECTIVE_ENV_JSON" '
-
-                . as $root
-
-                |
-
-                [
-                    $envs[] as $environment
-                    |
-                    $root.environments[$environment].namespace
-                ]
-
-            ' "$CLUSTER_FILE"
-        )"
-
-
         echo
         echo "  User: $USER_NAME"
-        echo "    profiles     : $(join_json_array "$PROFILE_JSON")"
-        echo "    environments : $(join_json_array "$EFFECTIVE_ENV_JSON")"
-        echo "    namespaces   : $(join_json_array "$NAMESPACE_JSON")"
 
 
         # --------------------------------------------------------------
