@@ -637,8 +637,31 @@ CONFIG_DIR="$(
 mkdir -p \
     "$WORKSPACE_DIR/artifacts" \
     "$WORKSPACE_DIR/tools" \
-    "$WORKSPACE_DIR/clusters" \
-    "$WORKSPACE_DIR/runtime"
+    "$WORKSPACE_DIR/clusters"
+
+
+# ----------------------------------------------------------------------
+# Legacy runtime directory
+#
+# runtime/ used to be a public workspace directory. No current step uses
+# it. Remove it only when it is an empty real directory; never delete user
+# content and never follow a symlink.
+# ----------------------------------------------------------------------
+
+LEGACY_RUNTIME_DIR="$WORKSPACE_DIR/runtime"
+LEGACY_RUNTIME_STATUS="absent"
+
+if [ -L "$LEGACY_RUNTIME_DIR" ]; then
+    LEGACY_RUNTIME_STATUS="retained (symlink)"
+elif [ -d "$LEGACY_RUNTIME_DIR" ]; then
+    if rmdir -- "$LEGACY_RUNTIME_DIR" 2>/dev/null; then
+        LEGACY_RUNTIME_STATUS="removed (empty)"
+    else
+        LEGACY_RUNTIME_STATUS="retained (not empty)"
+    fi
+elif [ -e "$LEGACY_RUNTIME_DIR" ]; then
+    LEGACY_RUNTIME_STATUS="retained (non-directory)"
+fi
 
 
 # ----------------------------------------------------------------------
@@ -743,7 +766,10 @@ echo "Directories:"
 echo "  artifacts : $WORKSPACE_DIR/artifacts"
 echo "  tools     : $WORKSPACE_DIR/tools"
 echo "  clusters  : $WORKSPACE_DIR/clusters"
-echo "  runtime   : $WORKSPACE_DIR/runtime"
+
+echo
+echo "Legacy cleanup:"
+echo "  runtime   : $LEGACY_RUNTIME_STATUS"
 
 echo
 echo "Initialization complete."
