@@ -658,21 +658,47 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         API_ERROR_FILE="$TEMP_DIR/api-error.$$"
         : > "$API_ERROR_FILE"
 
-        if API_VERSION_JSON="$(
+        # Use the core API discovery endpoint as the readiness/authentication
+        # probe. Restricted Rancher profiles may legitimately have access to
+        # /api and /apis while /version is denied as a non-resource URL.
+        # Therefore /version is informational only and must not decide whether
+        # a profile is usable.
+        if API_DISCOVERY_JSON="$(
             "$KUBECTL_BIN" \
                 --kubeconfig "$KUBECONFIG_FILE" \
                 --context "$SELECTED_CONTEXT" \
                 --request-timeout="$REQUEST_TIMEOUT" \
-                get --raw=/version \
+                get --raw=/api \
                 2>"$API_ERROR_FILE"
         )"
         then
             API_READY=$((API_READY + 1))
-            API_GIT_VERSION="$(jq -r '.gitVersion // "unknown"' <<< "$API_VERSION_JSON")"
-            echo "  api        : OK ($API_GIT_VERSION)"
+
+            API_CORE_VERSIONS="$(
+                jq -r '(.versions // []) | join(",")' \
+                    <<< "$API_DISCOVERY_JSON" 2>/dev/null || true
+            )"
+
+            API_GIT_VERSION="$(
+                "$KUBECTL_BIN" \
+                    --kubeconfig "$KUBECONFIG_FILE" \
+                    --context "$SELECTED_CONTEXT" \
+                    --request-timeout="$REQUEST_TIMEOUT" \
+                    get --raw=/version \
+                    2>/dev/null |
+                jq -r '.gitVersion // empty' 2>/dev/null || true
+            )"
+
+            if [ -n "$API_GIT_VERSION" ]; then
+                echo "  api        : OK ($API_GIT_VERSION)"
+            elif [ -n "$API_CORE_VERSIONS" ]; then
+                echo "  api        : OK (core discovery: $API_CORE_VERSIONS)"
+            else
+                echo "  api        : OK"
+            fi
         else
             API_ERROR="$(first_nonempty_line "$API_ERROR_FILE")"
-            record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API request failed: $API_ERROR"
+            record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API discovery failed: $API_ERROR"
             FAILED=$((FAILED + 1))
             echo "  api        : FAILED"
             echo "  status     : FAILED"
