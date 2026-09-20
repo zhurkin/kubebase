@@ -762,18 +762,34 @@ print_discovery_summary()
         printf '  %-34s : %s\n' "Cached at" "$INVENTORY_TIMESTAMP"
     fi
 
-    if [ "$list_text" = "NO" ] && [[ "$INVENTORY_NOTE" == *Forbidden* || "$INVENTORY_NOTE" == *forbidden* ]]; then
-        printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "NO (Forbidden)"
+    if [ "$INVENTORY_SOURCE" = "cache" ]; then
+        if [ "$list_text" = "NO" ] && [[ "$INVENTORY_NOTE" == *Forbidden* || "$INVENTORY_NOTE" == *forbidden* ]]; then
+            printf '  %-34s : %s\n' "Namespace LIST at cache refresh" "NO (Forbidden)"
+        else
+            printf '  %-34s : %s\n' "Namespace LIST at cache refresh" "$list_text"
+        fi
     else
-        printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "$list_text"
+        if [ "$list_text" = "NO" ] && [[ "$INVENTORY_NOTE" == *Forbidden* || "$INVENTORY_NOTE" == *forbidden* ]]; then
+            printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "NO (Forbidden)"
+        else
+            printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "$list_text"
+        fi
     fi
 
     printf '  %-34s : %s\n' "Namespaces verified" "$namespace_count"
 
-    if [ "$INVENTORY_COMPLETE" = "true" ]; then
-        printf '  %-34s : %s\n' "Complete list guaranteed" "YES"
+    if [ "$INVENTORY_SOURCE" = "cache" ]; then
+        if [ "$INVENTORY_COMPLETE" = "true" ]; then
+            printf '  %-34s : %s\n' "Complete cached list guaranteed" "YES"
+        else
+            printf '  %-34s : %s\n' "Complete cached list guaranteed" "NO"
+        fi
     else
-        printf '  %-34s : %s\n' "Complete list guaranteed" "NO"
+        if [ "$INVENTORY_COMPLETE" = "true" ]; then
+            printf '  %-34s : %s\n' "Complete list guaranteed" "YES"
+        else
+            printf '  %-34s : %s\n' "Complete list guaranteed" "NO"
+        fi
     fi
 
     printf '  %-34s : %s\n' "Namespace groups discovered" "$group_count"
