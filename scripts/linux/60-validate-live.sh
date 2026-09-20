@@ -32,7 +32,7 @@ CLUSTER_SCHEMA="kubebase.cluster"
 CLUSTER_SCHEMA_VERSION=1
 
 INVENTORY_SCHEMA="kubebase.namespaceInventory"
-INVENTORY_SCHEMA_VERSION=1
+INVENTORY_SCHEMA_VERSION=2
 
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 DEFAULT_REQUEST_TIMEOUT="10s"
@@ -188,7 +188,7 @@ first_nonempty_line()
 }
 
 
-project_id_from_namespace_json()
+group_id_from_namespace_json()
 {
     jq -r '
         (
@@ -220,7 +220,7 @@ entries_from_namespace_list()
             |
             {
                 name: .metadata.name,
-                projectId: (
+                groupId: (
                     .metadata.labels["field.cattle.io/projectId"]
                     //
                     (
@@ -336,7 +336,7 @@ discover_namespace_inventory()
     local candidate
     local candidate_json
     local candidate_error_file
-    local project_id
+    local group_id
     local entries_file="$TEMP_DIR/entries.$$"
     local entries_json
     local timestamp
@@ -469,15 +469,15 @@ discover_namespace_inventory()
                 2>"$candidate_error_file"
         )"
         then
-            project_id="$(project_id_from_namespace_json <<< "$candidate_json")"
+            group_id="$(group_id_from_namespace_json <<< "$candidate_json")"
 
             jq -cn \
                 --arg name "$candidate" \
-                --arg projectId "$project_id" '
+                --arg groupId "$group_id" '
                 {
                     name: $name,
-                    projectId: (
-                        if $projectId == "" then null else $projectId end
+                    groupId: (
+                        if $groupId == "" then null else $groupId end
                     )
                 }
             ' >> "$entries_file"
@@ -691,7 +691,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
         # Namespace discovery itself is the live API/authentication probe.
         # This avoids relying on non-resource endpoints such as /version or
-        # /api, which Rancher or Kubernetes RBAC may deny even when normal
+        # /api, which API gateways or Kubernetes RBAC may deny even when normal
         # namespaced API access is fully usable.
         if discover_namespace_inventory \
             "$KUBECTL_BIN" \
@@ -721,8 +721,8 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
             )"
 
             NS_COUNT="$(jq '.entries | length' <<< "$DISCOVERY_JSON")"
-            PROJECT_COUNT="$(
-                jq '[.entries[].projectId | select(. != null and . != "")] | unique | length' \
+            GROUP_COUNT="$(
+                jq '[.entries[].groupId | select(. != null and . != "")] | unique | length' \
                     <<< "$DISCOVERY_JSON"
             )"
 
@@ -770,7 +770,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                 printf '    %-34s : %s\n' "Complete list guaranteed" "NO"
             fi
 
-            printf '    %-34s : %s\n' "Rancher projects discovered" "$PROJECT_COUNT"
+            printf '    %-34s : %s\n' "Namespace groups discovered" "$GROUP_COUNT"
 
             echo
             echo "  Cache:"
