@@ -349,6 +349,8 @@ discover_namespace_inventory()
     DISCOVERY_ERROR=""
     DISCOVERY_API_READY="false"
     DISCOVERY_LIST_ERROR=""
+    DISCOVERY_NAMES_FOUND=0
+    DISCOVERY_NAMES_VERIFIED=0
 
     : > "$list_error_file"
 
@@ -378,6 +380,8 @@ discover_namespace_inventory()
         DISCOVERY_METHOD="namespace-list"
         DISCOVERY_COMPLETE="true"
         DISCOVERY_API_READY="true"
+        DISCOVERY_NAMES_FOUND="$(jq 'length' <<< "$entries_json")"
+        DISCOVERY_NAMES_VERIFIED="$DISCOVERY_NAMES_FOUND"
         return 0
     fi
 
@@ -452,6 +456,7 @@ discover_namespace_inventory()
         [ -n "$candidate" ] || continue
         namespace_name_is_valid "$candidate" || continue
 
+        DISCOVERY_NAMES_FOUND=$((DISCOVERY_NAMES_FOUND + 1))
         candidate_error_file="$TEMP_DIR/candidate-error.$$.${RANDOM}"
 
         if candidate_json="$(
@@ -476,6 +481,7 @@ discover_namespace_inventory()
                     )
                 }
             ' >> "$entries_file"
+            DISCOVERY_NAMES_VERIFIED=$((DISCOVERY_NAMES_VERIFIED + 1))
         fi
 
         rm -f -- "$candidate_error_file"
@@ -706,13 +712,6 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                 jq -r '.gitVersion // empty' 2>/dev/null || true
             )"
 
-            if [ -n "$API_GIT_VERSION" ]; then
-                echo "  api        : OK ($API_GIT_VERSION)"
-            elif [ "$DISCOVERY_METHOD" = "namespace-list" ]; then
-                echo "  api        : OK (namespace API)"
-            else
-                echo "  api        : OK (authorization review)"
-            fi
             CACHE_FILE="$(
                 write_inventory_cache \
                     "$WORKSPACE_DIR" \
@@ -727,38 +726,104 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                     <<< "$DISCOVERY_JSON"
             )"
 
-            echo "  discovery  : $DISCOVERY_METHOD"
-            echo "  namespaces   : $NS_COUNT verified"
-            echo "  projects     : $PROJECT_COUNT"
-            echo "  cache        : $CACHE_FILE"
+            echo
+            echo "  Connection:"
+            printf '    %-34s : %s\n' "Kubernetes API reachable" "YES"
+            printf '    %-34s : %s\n' "Identity authenticated" "YES"
+
+            if [ -n "$API_GIT_VERSION" ]; then
+                printf '    %-34s : %s\n' "Server version" "$API_GIT_VERSION"
+            fi
+
+            if [ "$DISCOVERY_METHOD" = "namespace-list" ]; then
+                printf '    %-34s : %s\n' "Cluster-wide namespace LIST" "YES"
+            else
+                case "$DISCOVERY_LIST_ERROR" in
+                    *Forbidden*|*forbidden*)
+                        printf '    %-34s : %s\n' "Cluster-wide namespace LIST" "NO (Forbidden)"
+                        ;;
+                    *)
+                        printf '    %-34s : %s\n' "Cluster-wide namespace LIST" "NO"
+                        ;;
+                esac
+            fi
+
+            echo
+            echo "  Namespace discovery:"
+
+            if [ "$DISCOVERY_METHOD" = "namespace-list" ]; then
+                printf '    %-34s : %s\n' "Names returned by Kubernetes" "$DISCOVERY_NAMES_FOUND"
+            else
+                printf '    %-34s : %s\n' "Names found in authorization" "$DISCOVERY_NAMES_FOUND"
+            fi
+
+            printf '    %-34s : %s / %s\n' \
+                "Names verified through API" \
+                "$DISCOVERY_NAMES_VERIFIED" \
+                "$DISCOVERY_NAMES_FOUND"
 
             if [ "$DISCOVERY_COMPLETE" = "true" ]; then
                 INVENTORY_COMPLETE_COUNT=$((INVENTORY_COMPLETE_COUNT + 1))
-                echo "  completeness : complete"
+                printf '    %-34s : %s\n' "Complete list guaranteed" "YES"
             else
                 INVENTORY_PARTIAL_COUNT=$((INVENTORY_PARTIAL_COUNT + 1))
-                echo "  completeness : not guaranteed"
-                if [ -n "$DISCOVERY_NOTE" ]; then
-                    echo "  note         : $DISCOVERY_NOTE"
-                fi
+                printf '    %-34s : %s\n' "Complete list guaranteed" "NO"
             fi
 
-            echo "  status     : READY"
+            printf '    %-34s : %s\n' "Rancher projects discovered" "$PROJECT_COUNT"
+
+            echo
+            echo "  Cache:"
+            printf '    %-34s : %s\n' "Updated" "YES"
+            printf '    %-34s : %s\n' "File" "$CACHE_FILE"
+
+            echo
+            printf '  %-36s : %s\n' "Status" "READY"
         else
+            echo
+            echo "  Connection:"
+
             if [ "$DISCOVERY_API_READY" = "true" ]; then
                 API_READY=$((API_READY + 1))
                 INVENTORY_UNAVAILABLE_COUNT=$((INVENTORY_UNAVAILABLE_COUNT + 1))
                 record_warning "profile '$CLUSTER_NAME/$USER_NAME': namespace discovery unavailable: $DISCOVERY_ERROR"
-                echo "  api        : OK (authenticated; namespace inventory unavailable)"
-                echo "  discovery    : unavailable"
-                echo "  completeness : unavailable"
-                echo "  status       : PARTIAL"
+
+                printf '    %-34s : %s\n' "Kubernetes API reachable" "YES"
+                printf '    %-34s : %s\n' "Identity authenticated" "YES"
+                case "$DISCOVERY_LIST_ERROR" in
+                    *Forbidden*|*forbidden*)
+                        printf '    %-34s : %s\n' "Cluster-wide namespace LIST" "NO (Forbidden)"
+                        ;;
+                    *)
+                        printf '    %-34s : %s\n' "Cluster-wide namespace LIST" "NO"
+                        ;;
+                esac
+
+                echo
+                echo "  Namespace discovery:"
+                printf '    %-34s : %s\n' "Automatic name discovery" "UNAVAILABLE"
+                printf '    %-34s : %s\n' "Complete list guaranteed" "NO"
+                printf '    %-34s : %s\n' "Explicit namespace selection" "AVAILABLE"
+
+                echo
+                printf '  %-36s : %s\n' "Status" "PARTIAL"
             else
                 record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API/authentication failed: $DISCOVERY_ERROR"
                 FAILED=$((FAILED + 1))
-                echo "  api        : FAILED"
-                echo "  discovery  : unavailable"
-                echo "  status     : FAILED"
+
+                case "$DISCOVERY_ERROR" in
+                    *Unauthorized*|*unauthorized*)
+                        printf '    %-34s : %s\n' "Kubernetes API reachable" "YES"
+                        printf '    %-34s : %s\n' "Identity authenticated" "NO"
+                        ;;
+                    *)
+                        printf '    %-34s : %s\n' "Kubernetes API reachable" "NO or unknown"
+                        printf '    %-34s : %s\n' "Identity authenticated" "UNKNOWN"
+                        ;;
+                esac
+
+                echo
+                printf '  %-36s : %s\n' "Status" "FAILED"
             fi
         fi
     done
@@ -773,14 +838,14 @@ echo
 echo "Live validation complete."
 echo
 echo "Summary:"
-echo "  profiles              : $PROFILES"
-echo "  API ready             : $API_READY"
-echo "  complete inventories    : $INVENTORY_COMPLETE_COUNT"
-echo "  partial inventories     : $INVENTORY_PARTIAL_COUNT"
-echo "  inventory unavailable   : $INVENTORY_UNAVAILABLE_COUNT"
-echo "  failed                : $FAILED"
-echo "  warnings              : $WARNINGS"
-echo "  errors                : $ERRORS"
+printf '  %-38s : %s\n' "Profiles checked" "$PROFILES"
+printf '  %-38s : %s / %s\n' "Authenticated API access" "$API_READY" "$PROFILES"
+printf '  %-38s : %s\n' "Complete namespace lists" "$INVENTORY_COMPLETE_COUNT"
+printf '  %-38s : %s\n' "Namespace lists not guaranteed complete" "$INVENTORY_PARTIAL_COUNT"
+printf '  %-38s : %s\n' "Namespace discovery unavailable" "$INVENTORY_UNAVAILABLE_COUNT"
+printf '  %-38s : %s\n' "Failed profiles" "$FAILED"
+printf '  %-38s : %s\n' "Warnings" "$WARNINGS"
+printf '  %-38s : %s\n' "Errors" "$ERRORS"
 
 if [ "$ERRORS" -ne 0 ]; then
     echo
