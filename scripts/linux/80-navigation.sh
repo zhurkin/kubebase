@@ -696,34 +696,102 @@ clear_effective_namespace()
 # Display
 # ----------------------------------------------------------------------
 
+inventory_namespace_count()
+{
+    jq -r '.entries | length' <<< "$INVENTORY_JSON"
+}
+
+
+inventory_project_count()
+{
+    jq -r '
+        [
+            .entries[]
+            | select(.projectId != null and .projectId != "")
+            | .projectId
+        ]
+        | unique
+        | length
+    ' <<< "$INVENTORY_JSON"
+}
+
+
+print_discovery_summary()
+{
+    local namespace_count
+    local project_count
+    local source_text
+    local list_text
+
+    namespace_count="$(inventory_namespace_count)"
+    project_count="$(inventory_project_count)"
+
+    if [ "$INVENTORY_SOURCE" = "live" ]; then
+        source_text="LIVE Kubernetes API"
+    else
+        source_text="CACHE"
+    fi
+
+    case "$INVENTORY_METHOD" in
+        namespace-list)
+            list_text="YES"
+            ;;
+        auth-can-i)
+            list_text="NO"
+            ;;
+        *)
+            list_text="UNKNOWN"
+            ;;
+    esac
+
+    echo "Namespace discovery:"
+    printf '  %-34s : %s\n' "Data source" "$source_text"
+
+    if [ "$INVENTORY_SOURCE" = "cache" ]; then
+        printf '  %-34s : %s\n' "Cached at" "$INVENTORY_TIMESTAMP"
+    fi
+
+    if [ "$list_text" = "NO" ] && [[ "$INVENTORY_NOTE" == *Forbidden* || "$INVENTORY_NOTE" == *forbidden* ]]; then
+        printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "NO (Forbidden)"
+    else
+        printf '  %-34s : %s\n' "Cluster-wide namespace LIST" "$list_text"
+    fi
+
+    printf '  %-34s : %s\n' "Namespaces verified" "$namespace_count"
+
+    if [ "$INVENTORY_COMPLETE" = "true" ]; then
+        printf '  %-34s : %s\n' "Complete list guaranteed" "YES"
+    else
+        printf '  %-34s : %s\n' "Complete list guaranteed" "NO"
+    fi
+
+    printf '  %-34s : %s\n' "Rancher projects discovered" "$project_count"
+
+    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
+        printf '  %-34s : %s\n' "Project filter" "$KUBEBASE_PROJECT"
+    fi
+
+    case "$INVENTORY_NOTE" in
+        "cached inventory requested explicitly")
+            printf '  %-34s : %s\n' "Cache use" "explicitly requested"
+            ;;
+        "live discovery failed; using last valid cache")
+            printf '  %-34s : %s\n' "Cache use" "live discovery failed; using last valid cache"
+            ;;
+    esac
+
+    echo
+}
+
+
 print_inventory_header()
 {
     echo "$PROJECT_NAME namespaces"
     echo
-    echo "Profile  : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
-    echo "Context  : $KUBEBASE_CONTEXT"
-    echo "Source   : $INVENTORY_SOURCE"
-    echo "Method   : $INVENTORY_METHOD"
-
-    if [ "$INVENTORY_COMPLETE" = "true" ]; then
-        echo "Completeness : complete"
-    else
-        echo "Completeness : not guaranteed"
-    fi
-
-    if [ "$INVENTORY_SOURCE" = "cache" ]; then
-        echo "Cached   : $INVENTORY_TIMESTAMP"
-    fi
-
-    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        echo "Project  : $KUBEBASE_PROJECT"
-    fi
-
-    if [ -n "$INVENTORY_NOTE" ]; then
-        echo "Note     : $INVENTORY_NOTE"
-    fi
-
+    echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+    echo "Context : $KUBEBASE_CONTEXT"
     echo
+    print_discovery_summary
 }
 
 
@@ -780,40 +848,14 @@ print_project_table()
 {
     local count
 
-    count="$(
-        jq -r '
-            [
-                .entries[]
-                | select(.projectId != null and .projectId != "")
-                | .projectId
-            ]
-            | unique
-            | length
-        ' <<< "$INVENTORY_JSON"
-    )"
+    count="$(inventory_project_count)"
 
     echo "$PROJECT_NAME projects"
     echo
-    echo "Profile  : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
-    echo "Context  : $KUBEBASE_CONTEXT"
-    echo "Source   : $INVENTORY_SOURCE"
-    echo "Method   : $INVENTORY_METHOD"
-
-    if [ "$INVENTORY_COMPLETE" = "true" ]; then
-        echo "Completeness : complete"
-    else
-        echo "Completeness : not guaranteed"
-    fi
-
-    if [ "$INVENTORY_SOURCE" = "cache" ]; then
-        echo "Cached   : $INVENTORY_TIMESTAMP"
-    fi
-
-    if [ -n "$INVENTORY_NOTE" ]; then
-        echo "Note     : $INVENTORY_NOTE"
-    fi
-
+    echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+    echo "Context : $KUBEBASE_CONTEXT"
     echo
+    print_discovery_summary
 
     if [ "$count" -eq 0 ]; then
         echo "No Rancher project metadata was discovered."
@@ -838,7 +880,6 @@ print_project_table()
         printf '%-24s %s\n' "$project" "$count_value"
     done
 }
-
 
 # ----------------------------------------------------------------------
 # Visible commands
