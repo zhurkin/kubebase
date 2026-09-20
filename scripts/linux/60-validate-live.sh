@@ -664,7 +664,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         KUBECONFIG_FILE="$CLUSTER_DIR/users/$USER_NAME/$KUBECONFIG_REL"
 
         echo
-        echo "Profile: $CLUSTER_NAME/$USER_NAME"
+        echo "Profile : $CLUSTER_NAME/$USER_NAME"
         echo "  kubeconfig : $KUBECONFIG_FILE"
 
         if [ -n "$DECLARED_CONTEXT" ]; then
@@ -682,7 +682,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         if [ -z "$SELECTED_CONTEXT" ]; then
             record_error "profile '$CLUSTER_NAME/$USER_NAME': no context is selected"
             FAILED=$((FAILED + 1))
-            echo "  status     : FAILED"
+            printf '  %-36s : %s\n' "Status" "FAILED"
             continue
         fi
 
@@ -838,14 +838,14 @@ echo
 echo "Live validation complete."
 echo
 echo "Summary:"
-printf '  %-38s : %s\n' "Profiles checked" "$PROFILES"
-printf '  %-38s : %s / %s\n' "Authenticated API access" "$API_READY" "$PROFILES"
-printf '  %-38s : %s\n' "Complete namespace lists" "$INVENTORY_COMPLETE_COUNT"
-printf '  %-38s : %s\n' "Namespace lists not guaranteed complete" "$INVENTORY_PARTIAL_COUNT"
-printf '  %-38s : %s\n' "Namespace discovery unavailable" "$INVENTORY_UNAVAILABLE_COUNT"
-printf '  %-38s : %s\n' "Failed profiles" "$FAILED"
-printf '  %-38s : %s\n' "Warnings" "$WARNINGS"
-printf '  %-38s : %s\n' "Errors" "$ERRORS"
+printf '  %-40s : %s\n' "Profiles checked" "$PROFILES"
+printf '  %-40s : %s / %s\n' "Authenticated API access" "$API_READY" "$PROFILES"
+printf '  %-40s : %s\n' "Complete namespace lists" "$INVENTORY_COMPLETE_COUNT"
+printf '  %-40s : %s\n' "Namespace lists not guaranteed complete" "$INVENTORY_PARTIAL_COUNT"
+printf '  %-40s : %s\n' "Namespace discovery unavailable" "$INVENTORY_UNAVAILABLE_COUNT"
+printf '  %-40s : %s\n' "Failed profiles" "$FAILED"
+printf '  %-40s : %s\n' "Warnings" "$WARNINGS"
+printf '  %-40s : %s\n' "Errors" "$ERRORS"
 
 if [ "$ERRORS" -ne 0 ]; then
     echo
