@@ -631,7 +631,7 @@ materialize_cluster_toolchain()
         then
 
             fail \
-                "cluster '$cluster_name' requires missing or corrupt installed tool: $tool_name $tool_version $platform; run KubeBase install"
+                "cluster '$cluster_name' requires missing or corrupt installed tool: $tool_name $tool_version $platform; run: kubebase install"
 
         fi
 
@@ -986,7 +986,7 @@ fi
 if [ ! -d "$TOOLS_DIR" ]; then
 
     fail \
-        "workspace tools directory not found: $TOOLS_DIR; run KubeBase init"
+        "workspace tools directory not found: $TOOLS_DIR; run: kubebase init"
 
 fi
 
@@ -994,7 +994,7 @@ fi
 if [ ! -d "$CONFIG_LINK" ]; then
 
     fail \
-        "workspace config path not found: $CONFIG_LINK; run KubeBase init"
+        "workspace config path not found: $CONFIG_LINK; run: kubebase init"
 
 fi
 
