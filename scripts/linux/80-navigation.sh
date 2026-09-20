@@ -8,12 +8,16 @@ set -euo pipefail
 # Step 80 - Namespace and Rancher project navigation
 # Linux / Bash
 #
-# Namespace inventory is live by default. Discovery is best effort:
+# Namespace inventory is live by default. Discovery is capability-based:
 #
-#   1. list Namespace objects when RBAC permits it;
-#   2. otherwise inspect SelfSubjectRulesReview resourceNames and verify
-#      each candidate Namespace object individually;
+#   1. list Namespace objects when RBAC permits cluster-wide LIST;
+#   2. otherwise inspect `kubectl auth can-i --list` resourceNames and
+#      verify every discovered Namespace object individually;
 #   3. if live discovery is unavailable, fall back to the last valid cache.
+#
+# In fallback mode the discovered namespaces are verified, but KubeBase
+# cannot guarantee that the inventory contains every namespace accessible
+# to the current identity.
 #
 # A Kubernetes context still has at most one default namespace. KubeBase
 # does not wrap kubectl or emulate multi-namespace kubectl semantics.
@@ -520,7 +524,14 @@ live_discover_inventory()
     INVENTORY_METHOD="auth-can-i"
     INVENTORY_COMPLETE="false"
     INVENTORY_TIMESTAMP="$timestamp"
-    INVENTORY_NOTE="namespace LIST is unavailable; inventory is best effort"
+    case "$list_error" in
+        *Forbidden*|*forbidden*)
+            INVENTORY_NOTE="cluster-wide namespace LIST is forbidden"
+            ;;
+        *)
+            INVENTORY_NOTE="cluster-wide namespace LIST did not succeed"
+            ;;
+    esac
 
     write_cache "$INVENTORY_JSON"
     return 0
@@ -695,9 +706,9 @@ print_inventory_header()
     echo "Method   : $INVENTORY_METHOD"
 
     if [ "$INVENTORY_COMPLETE" = "true" ]; then
-        echo "Complete : yes"
+        echo "Completeness : complete"
     else
-        echo "Complete : no (best effort)"
+        echo "Completeness : not guaranteed"
     fi
 
     if [ "$INVENTORY_SOURCE" = "cache" ]; then
@@ -789,9 +800,9 @@ print_project_table()
     echo "Method   : $INVENTORY_METHOD"
 
     if [ "$INVENTORY_COMPLETE" = "true" ]; then
-        echo "Complete : yes"
+        echo "Completeness : complete"
     else
-        echo "Complete : no (best effort)"
+        echo "Completeness : not guaranteed"
     fi
 
     if [ "$INVENTORY_SOURCE" = "cache" ]; then
