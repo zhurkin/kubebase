@@ -5,35 +5,26 @@ set -euo pipefail
 
 # ----------------------------------------------------------------------
 # KubeBase
-# Step 30 - Tool installation
+# Step 20 - Artifact fetch
 # Linux
 #
-# Installs verified artifacts from:
-#
-#   artifacts/<platform>/<tool>/<version>/
-#
-# into:
-#
-#   tools/<platform>/<tool>/<version>/
-#
-# No network access is used here.
-#
-# Artifact identity:
+# Downloads the unique set of:
 #
 #   tool + version + platform
 #
-# Multiple clusters may use the same installed tool.
+# required by all kubebase.cluster documents.
+#
+# Multiple clusters may require the same artifact. The artifact is kept
+# once in the shared workspace artifact store and is downloaded once.
 # ----------------------------------------------------------------------
 
 PROJECT_NAME="KubeBase"
 
 CLUSTER_SCHEMA="kubebase.cluster"
+TOOL_SOURCES_SCHEMA="kubebase.toolSources"
 
 ARTIFACT_SCHEMA="kubebase.artifact"
 ARTIFACT_SCHEMA_VERSION=1
-
-INSTALL_SCHEMA="kubebase.toolInstall"
-INSTALL_SCHEMA_VERSION=1
 
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 
@@ -55,8 +46,8 @@ REPO_ROOT="$(
 REPO_PARENT="$(dirname -- "$REPO_ROOT")"
 
 DEFAULT_WORKSPACE_ROOT="$REPO_PARENT"
-
-CONFIG_VALIDATOR="$SCRIPT_DIR/10-validate-config.sh"
+DEFAULT_SOURCES_FILE="$REPO_ROOT/tool-sources.default.json"
+SOURCE_VALIDATOR="$SCRIPT_DIR/11-validate-sources.sh"
 
 
 # ----------------------------------------------------------------------
@@ -66,9 +57,10 @@ CONFIG_VALIDATOR="$SCRIPT_DIR/10-validate-config.sh"
 WORKSPACE_NAME="$DEFAULT_WORKSPACE_NAME"
 WORKSPACE_ROOT="$DEFAULT_WORKSPACE_ROOT"
 
-PLATFORM_FILTER=""
-ALL_PLATFORMS=0
+TOOL_SOURCES_FILE=""
+TOOL_SOURCES_EXPLICIT=0
 
+PLATFORM_FILTER=""
 DRY_RUN=0
 
 
@@ -77,16 +69,23 @@ DRY_RUN=0
 # ----------------------------------------------------------------------
 
 ACTIVE_STAGE=""
+ACTIVE_AUTH_FILE=""
 PLAN_FILE=""
 
 CLUSTER_BINDINGS=0
 PLANNED=0
-
-INSTALLED=0
+FETCHED=0
 EXISTING=0
 
 CONFIG_FILES=()
 CLUSTER_FILES=()
+TOOL_SOURCE_FILES=()
+
+# Artifact identity is:
+#
+#   tool <US> version <US> platform
+#
+# where US = ASCII Unit Separator 0x1f.
 
 declare -A REQUIREMENTS=()
 declare -A REQUIREMENT_CLUSTERS=()
@@ -109,6 +108,10 @@ cleanup()
         rm -rf -- "$ACTIVE_STAGE"
     fi
 
+    if [ -n "$ACTIVE_AUTH_FILE" ] && [ -f "$ACTIVE_AUTH_FILE" ]; then
+        rm -f -- "$ACTIVE_AUTH_FILE"
+    fi
+
     if [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ]; then
         rm -f -- "$PLAN_FILE"
     fi
@@ -118,10 +121,26 @@ cleanup()
 trap cleanup EXIT HUP INT TERM
 
 
+canonical_file()
+{
+    local path="$1"
+    local dir
+    local file
+
+    dir="$(dirname -- "$path")"
+    file="$(basename -- "$path")"
+
+    (
+        cd -- "$dir"
+        printf '%s/%s\n' "$(pwd -P)" "$file"
+    )
+}
+
+
 usage()
 {
     cat <<EOF_USAGE
-$PROJECT_NAME tool installation
+$PROJECT_NAME artifact fetch
 
 Usage:
   $(basename "$0") [options]
@@ -139,143 +158,77 @@ Options:
       Default:
         $DEFAULT_WORKSPACE_ROOT
 
-  --platform PLATFORM
-      Install tools for PLATFORM instead of the current host platform.
+  --tool-sources PATH
+      Temporarily use PATH as kubebase.toolSources override.
 
-      Examples:
+  --platform PLATFORM
+      Fetch only requirements for PLATFORM.
+
+      Example:
         linux-amd64
         windows-amd64
 
-  --all-platforms
-      Install all toolPlatforms required by all configured clusters.
-
   --dry-run
-      Verify artifacts and display the installation plan
-      without writing tools/.
+      Resolve and display the artifact plan without downloading.
 
   -h, --help
       Show this help.
 
 Examples:
-  $(basename "$0")
-
   $(basename "$0") --dry-run
+
+  $(basename "$0")
 
   $(basename "$0") --platform windows-amd64
 
-  $(basename "$0") --all-platforms
+  $(basename "$0") \
+      --tool-sources /etc/kubebase/sources.json
 EOF_USAGE
 }
 
 
-detect_host_platform()
+resolve_version_url()
 {
-    local os_name
-    local arch_name
+    local template="$1"
+    local version="$2"
 
-
-    case "$(uname -s)" in
-
-        Linux)
-            os_name="linux"
-            ;;
-
-        *)
-            fail \
-                "unsupported host operating system for Linux installer: $(uname -s)"
-            ;;
-
-    esac
-
-
-    case "$(uname -m)" in
-
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-
-        *)
-            fail \
-                "unsupported host architecture: $(uname -m)"
-            ;;
-
-    esac
-
-
-    printf '%s-%s\n' \
-        "$os_name" \
-        "$arch_name"
+    printf '%s\n' "${template//\{version\}/$version}"
 }
 
 
-safe_component()
+url_basename()
 {
-    local value="$1"
+    local url="$1"
 
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*$ ]] &&
-    [ "$value" != "." ] &&
-    [ "$value" != ".." ]
+    url="${url%%#*}"
+    url="${url%%\?*}"
+    url="${url%/}"
+
+    basename -- "$url"
 }
 
 
 safe_filename()
 {
-    local value="$1"
+    local name="$1"
 
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
 }
 
 
-safe_member_path()
+safe_version()
 {
-    local value="$1"
-    local part
+    local version="$1"
 
-    local -a parts
-
-
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+~/-]*$ ]] || \
-        return 1
-
-    [[ "$value" != /* ]] || \
-        return 1
-
-    [[ "$value" != */ ]] || \
-        return 1
-
-    [[ "$value" != *//* ]] || \
-        return 1
-
-
-    IFS='/' read -r -a parts <<< "$value"
-
-
-    for part in "${parts[@]}"; do
-
-        [ -n "$part" ] || \
-            return 1
-
-        [ "$part" != "." ] || \
-            return 1
-
-        [ "$part" != ".." ] || \
-            return 1
-
-    done
-
-
-    return 0
+    [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*$ ]] &&
+    [ "$version" != "." ] &&
+    [ "$version" != ".." ]
 }
 
 
 sorted_cluster_list()
 {
     local value="$1"
-
 
     printf '%s\n' "$value" |
         tr ',' '\n' |
@@ -287,7 +240,6 @@ sorted_cluster_list()
                 }
 
                 printf "%s", $0
-
                 first = 1
             }
 
@@ -295,6 +247,272 @@ sorted_cluster_list()
                 print ""
             }
         '
+}
+
+
+# ----------------------------------------------------------------------
+# Authentication helpers
+# ----------------------------------------------------------------------
+
+read_auth_secret()
+{
+    local auth_json="$1"
+    local direct_field="$2"
+    local env_field="$3"
+    local file_field="$4"
+
+    local env_name
+    local file_name
+    local value
+
+
+    if jq -e \
+        --arg field "$direct_field" '
+        has($field)
+    ' >/dev/null <<< "$auth_json"
+    then
+        jq -r \
+            --arg field "$direct_field" '
+            .[$field]
+        ' <<< "$auth_json"
+
+        return 0
+    fi
+
+
+    if jq -e \
+        --arg field "$env_field" '
+        has($field)
+    ' >/dev/null <<< "$auth_json"
+    then
+        env_name="$(
+            jq -r \
+                --arg field "$env_field" '
+                .[$field]
+            ' <<< "$auth_json"
+        )"
+
+        if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            fail "invalid authentication environment variable name: $env_name"
+        fi
+
+        if ! value="$(printenv "$env_name")"; then
+            fail "authentication environment variable is not set: $env_name"
+        fi
+
+        if [ -z "$value" ]; then
+            fail "authentication environment variable is empty: $env_name"
+        fi
+
+        printf '%s' "$value"
+        return 0
+    fi
+
+
+    if jq -e \
+        --arg field "$file_field" '
+        has($field)
+    ' >/dev/null <<< "$auth_json"
+    then
+        file_name="$(
+            jq -r \
+                --arg field "$file_field" '
+                .[$field]
+            ' <<< "$auth_json"
+        )"
+
+        if [[ "$file_name" != /* ]]; then
+            fail "authentication secret file must currently use an absolute path: $file_name"
+        fi
+
+        [ -f "$file_name" ] || \
+            fail "authentication secret file not found: $file_name"
+
+        [ -r "$file_name" ] || \
+            fail "authentication secret file is not readable: $file_name"
+
+        cat -- "$file_name"
+        return 0
+    fi
+
+
+    fail "authentication secret is not configured"
+}
+
+
+curl_config_escape()
+{
+    local value="$1"
+
+    case "$value" in
+        *$'\n'*|*$'\r'*)
+            fail "authentication value contains newline characters"
+            ;;
+    esac
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+
+    printf '%s' "$value"
+}
+
+
+prepare_auth_file()
+{
+    local source_name="$1"
+    local destination="$2"
+
+    local auth_json
+    local auth_type
+
+    local username
+    local password
+    local token
+
+    local header_name
+    local header_value
+
+    local escaped
+
+
+    auth_json="$(
+        jq -c \
+            --arg source "$source_name" '
+            .sources[$source].auth
+            //
+            .defaults.auth
+            //
+            {"type":"none"}
+        ' <<< "$EFFECTIVE_JSON"
+    )"
+
+
+    auth_type="$(
+        jq -r '
+            .type
+        ' <<< "$auth_json"
+    )"
+
+
+    : > "$destination"
+    chmod 600 "$destination"
+
+
+    case "$auth_type" in
+
+        none)
+            ;;
+
+
+        basic)
+            username="$(
+                jq -r '
+                    .username
+                ' <<< "$auth_json"
+            )"
+
+            if [[ "$username" == *:* ]]; then
+                fail "basic authentication username must not contain ':'"
+            fi
+
+            password="$(
+                read_auth_secret \
+                    "$auth_json" \
+                    "password" \
+                    "passwordEnv" \
+                    "passwordFile"
+            )"
+
+            escaped="$(
+                curl_config_escape "$username:$password"
+            )"
+
+            printf 'user = "%s"\n' \
+                "$escaped" \
+                >> "$destination"
+            ;;
+
+
+        bearer)
+            token="$(
+                read_auth_secret \
+                    "$auth_json" \
+                    "token" \
+                    "tokenEnv" \
+                    "tokenFile"
+            )"
+
+            escaped="$(
+                curl_config_escape "Authorization: Bearer $token"
+            )"
+
+            printf 'header = "%s"\n' \
+                "$escaped" \
+                >> "$destination"
+            ;;
+
+
+        header)
+            header_name="$(
+                jq -r '
+                    .name
+                ' <<< "$auth_json"
+            )"
+
+            if [[ ! "$header_name" =~ ^[A-Za-z0-9-]+$ ]]; then
+                fail "invalid HTTP authentication header name: $header_name"
+            fi
+
+            header_value="$(
+                read_auth_secret \
+                    "$auth_json" \
+                    "value" \
+                    "valueEnv" \
+                    "valueFile"
+            )"
+
+            escaped="$(
+                curl_config_escape "$header_name: $header_value"
+            )"
+
+            printf 'header = "%s"\n' \
+                "$escaped" \
+                >> "$destination"
+            ;;
+
+
+        *)
+            fail "unsupported authentication type: $auth_type"
+            ;;
+
+    esac
+}
+
+
+# ----------------------------------------------------------------------
+# Download
+# ----------------------------------------------------------------------
+
+download_file()
+{
+    local url="$1"
+    local destination="$2"
+
+    curl \
+        --config "$ACTIVE_AUTH_FILE" \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --max-redirs 5 \
+        --connect-timeout 10 \
+        --max-time 600 \
+        --retry 2 \
+        --retry-delay 1 \
+        --proto '=http,https' \
+        --proto-redir '=http,https' \
+        --output "$destination" \
+        "$url"
 }
 
 
@@ -313,8 +531,19 @@ extract_expected_sha256()
 
     case "$checksum_type" in
 
-        sha256-raw|sha256sum)
+        sha256-raw)
+            expected="$(
+                awk '
+                    NF {
+                        print $1
+                        exit
+                    }
+                ' "$checksum_file"
+            )"
+            ;;
 
+
+        sha256sum)
             expected="$(
                 awk '
                     NF {
@@ -327,7 +556,6 @@ extract_expected_sha256()
 
 
         sha256sum-list)
-
             expected="$(
                 awk \
                     -v target="$artifact_filename" '
@@ -352,7 +580,6 @@ extract_expected_sha256()
 
 
         *)
-
             return 1
             ;;
 
@@ -372,15 +599,12 @@ extract_expected_sha256()
 
 
 # ----------------------------------------------------------------------
-# Artifact verification
-#
-# Artifact is verified again before installation.
+# Existing artifact verification
 # ----------------------------------------------------------------------
 
-verify_artifact_store()
+verify_existing_artifact()
 {
     local dir="$1"
-
     local requested_tool="$2"
     local requested_version="$3"
     local requested_platform="$4"
@@ -388,9 +612,6 @@ verify_artifact_store()
     local manifest="$dir/manifest.json"
 
     local artifact_file
-    local artifact_type
-    local source_binary
-
     local checksum_file
     local checksum_type
 
@@ -399,8 +620,7 @@ verify_artifact_store()
     local actual
 
 
-    [ -f "$manifest" ] || \
-        return 1
+    [ -f "$manifest" ] || return 1
 
 
     if ! jq -e \
@@ -424,47 +644,25 @@ verify_artifact_store()
 
         and
 
-        (.artifact | type) == "object"
-        and
         (.artifact.file | type) == "string"
-        and
-        (.artifact.type | type) == "string"
-        and
-        (.artifact.binary | type) == "string"
         and
         (.artifact.sha256 | type) == "string"
 
         and
 
-        (.checksum | type) == "object"
-        and
         (.checksum.file | type) == "string"
         and
         (.checksum.type | type) == "string"
 
     ' "$manifest" >/dev/null 2>&1
     then
-
         return 1
-
     fi
 
 
     artifact_file="$(
         jq -r '
             .artifact.file
-        ' "$manifest"
-    )"
-
-    artifact_type="$(
-        jq -r '
-            .artifact.type
-        ' "$manifest"
-    )"
-
-    source_binary="$(
-        jq -r '
-            .artifact.binary
         ' "$manifest"
     )"
 
@@ -489,33 +687,12 @@ verify_artifact_store()
     expected="${expected,,}"
 
 
-    safe_filename "$artifact_file" || \
-        return 1
-
-    safe_filename "$checksum_file" || \
-        return 1
-
-    safe_member_path "$source_binary" || \
-        return 1
+    safe_filename "$artifact_file" || return 1
+    safe_filename "$checksum_file" || return 1
 
 
-    case "$artifact_type" in
-
-        binary|tar.gz|zip)
-            ;;
-
-        *)
-            return 1
-            ;;
-
-    esac
-
-
-    [ -f "$dir/$artifact_file" ] || \
-        return 1
-
-    [ -f "$dir/$checksum_file" ] || \
-        return 1
+    [ -f "$dir/$artifact_file" ] || return 1
+    [ -f "$dir/$checksum_file" ] || return 1
 
 
     actual="$(
@@ -526,8 +703,7 @@ verify_artifact_store()
     actual="${actual,,}"
 
 
-    [ "$actual" = "$expected" ] || \
-        return 1
+    [ "$actual" = "$expected" ] || return 1
 
 
     if ! checksum_expected="$(
@@ -537,226 +713,11 @@ verify_artifact_store()
             "$artifact_file"
     )"
     then
-
         return 1
-
     fi
 
 
-    [ "$checksum_expected" = "$expected" ] || \
-        return 1
-
-
-    return 0
-}
-
-
-# ----------------------------------------------------------------------
-# Archive member lookup
-# ----------------------------------------------------------------------
-
-find_tar_member()
-{
-    local archive="$1"
-    local wanted="$2"
-
-
-    tar --warning=no-unknown-keyword -tzf "$archive" |
-        awk \
-            -v wanted="$wanted" '
-            {
-                original = $0
-                normalized = $0
-
-                sub(/^\.\//, "", normalized)
-
-                if (!found && normalized == wanted) {
-                    print original
-                    found = 1
-                }
-            }
-        '
-}
-
-
-find_zip_member()
-{
-    local archive="$1"
-    local wanted="$2"
-
-
-    unzip -Z1 "$archive" |
-        awk \
-            -v wanted="$wanted" '
-            {
-                original = $0
-                normalized = $0
-
-                sub(/^\.\//, "", normalized)
-
-                if (!found && normalized == wanted) {
-                    print original
-                    found = 1
-                }
-            }
-        '
-}
-
-
-# ----------------------------------------------------------------------
-# Installed filename
-#
-# Source archive path may be platform-specific:
-#
-#   linux-amd64/helm
-#   krew-linux_amd64
-#
-# The shared tool store uses the logical tool name:
-#
-#   helm
-#   krew
-#
-# Windows gets .exe.
-# ----------------------------------------------------------------------
-
-installed_filename()
-{
-    local tool="$1"
-    local source_binary="$2"
-
-    local base
-
-
-    base="$(
-        basename -- "$source_binary"
-    )"
-
-
-    case "$base" in
-
-        *.exe)
-            printf '%s.exe\n' "$tool"
-            ;;
-
-        *)
-            printf '%s\n' "$tool"
-            ;;
-
-    esac
-}
-
-
-# ----------------------------------------------------------------------
-# Existing installation verification
-# ----------------------------------------------------------------------
-
-verify_existing_install()
-{
-    local dir="$1"
-
-    local requested_tool="$2"
-    local requested_version="$3"
-    local requested_platform="$4"
-
-    local artifact_sha256="$5"
-
-    local manifest="$dir/manifest.json"
-
-    local binary_file
-
-    local expected_binary_sha256
-    local actual_binary_sha256
-
-    local recorded_artifact_sha256
-
-
-    [ -f "$manifest" ] || \
-        return 1
-
-
-    if ! jq -e \
-        --arg schema "$INSTALL_SCHEMA" \
-        --argjson schemaVersion "$INSTALL_SCHEMA_VERSION" \
-        --arg tool "$requested_tool" \
-        --arg version "$requested_version" \
-        --arg platform "$requested_platform" '
-
-        .schema == $schema
-        and
-        .schemaVersion == $schemaVersion
-
-        and
-
-        .tool == $tool
-        and
-        .version == $version
-        and
-        .platform == $platform
-
-        and
-
-        (.artifact.sha256 | type) == "string"
-
-        and
-
-        (.binary.file | type) == "string"
-        and
-        (.binary.sha256 | type) == "string"
-
-    ' "$manifest" >/dev/null 2>&1
-    then
-
-        return 1
-
-    fi
-
-
-    binary_file="$(
-        jq -r '
-            .binary.file
-        ' "$manifest"
-    )"
-
-    expected_binary_sha256="$(
-        jq -r '
-            .binary.sha256
-        ' "$manifest"
-    )"
-
-    recorded_artifact_sha256="$(
-        jq -r '
-            .artifact.sha256
-        ' "$manifest"
-    )"
-
-
-    expected_binary_sha256="${expected_binary_sha256,,}"
-    recorded_artifact_sha256="${recorded_artifact_sha256,,}"
-    artifact_sha256="${artifact_sha256,,}"
-
-
-    safe_filename "$binary_file" || \
-        return 1
-
-
-    [ -f "$dir/$binary_file" ] || \
-        return 1
-
-
-    [ "$recorded_artifact_sha256" = "$artifact_sha256" ] || \
-        return 1
-
-
-    actual_binary_sha256="$(
-        sha256sum "$dir/$binary_file" |
-        awk '{print $1}'
-    )"
-
-    actual_binary_sha256="${actual_binary_sha256,,}"
-
-
-    [ "$actual_binary_sha256" = "$expected_binary_sha256" ] || \
-        return 1
+    [ "$checksum_expected" = "$expected" ] || return 1
 
 
     return 0
@@ -772,87 +733,67 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
 
         --workspace-name)
-
             [ "$#" -ge 2 ] || {
                 echo "ERROR: --workspace-name requires a value" >&2
                 exit 2
             }
 
             WORKSPACE_NAME="$2"
-
             shift 2
             ;;
 
 
         --workspace-root)
-
             [ "$#" -ge 2 ] || {
                 echo "ERROR: --workspace-root requires a value" >&2
                 exit 2
             }
 
             WORKSPACE_ROOT="$2"
+            shift 2
+            ;;
+
+
+        --tool-sources)
+            [ "$#" -ge 2 ] || {
+                echo "ERROR: --tool-sources requires a value" >&2
+                exit 2
+            }
+
+            TOOL_SOURCES_FILE="$2"
+            TOOL_SOURCES_EXPLICIT=1
 
             shift 2
             ;;
 
 
         --platform)
-
             [ "$#" -ge 2 ] || {
                 echo "ERROR: --platform requires a value" >&2
                 exit 2
             }
 
-
-            if [ "$ALL_PLATFORMS" -ne 0 ]; then
-                fail \
-                    "--platform and --all-platforms cannot be used together"
-            fi
-
-
             PLATFORM_FILTER="$2"
-
             shift 2
             ;;
 
 
-        --all-platforms)
-
-            if [ -n "$PLATFORM_FILTER" ]; then
-                fail \
-                    "--platform and --all-platforms cannot be used together"
-            fi
-
-
-            ALL_PLATFORMS=1
-
-            shift
-            ;;
-
-
         --dry-run)
-
             DRY_RUN=1
-
             shift
             ;;
 
 
         -h|--help)
-
             usage
             exit 0
             ;;
 
 
         *)
-
             echo "ERROR: unknown argument: $1" >&2
             echo >&2
-
             usage >&2
-
             exit 2
             ;;
 
@@ -868,6 +809,9 @@ done
 command -v jq >/dev/null 2>&1 || \
     fail "jq is required"
 
+command -v curl >/dev/null 2>&1 || \
+    fail "curl is required"
+
 command -v sha256sum >/dev/null 2>&1 || \
     fail "sha256sum is required"
 
@@ -875,24 +819,38 @@ command -v mktemp >/dev/null 2>&1 || \
     fail "mktemp is required"
 
 
-[ -x "$CONFIG_VALIDATOR" ] || \
-    fail \
-        "configuration validator not found or not executable: $CONFIG_VALIDATOR"
+[ -x "$SOURCE_VALIDATOR" ] || \
+    fail "source validator not found or not executable: $SOURCE_VALIDATOR"
 
 
 # ----------------------------------------------------------------------
-# Configuration preflight
-#
-# Step 30 intentionally does NOT use tool source configuration.
-#
-# Installation must work completely offline from already fetched
-# artifacts.
+# Source/configuration preflight
 # ----------------------------------------------------------------------
 
-"$CONFIG_VALIDATOR" \
-    --workspace-name "$WORKSPACE_NAME" \
-    --workspace-root "$WORKSPACE_ROOT" \
-    --quiet
+PREFLIGHT_ARGS=(
+    --workspace-name "$WORKSPACE_NAME"
+    --workspace-root "$WORKSPACE_ROOT"
+    --offline
+)
+
+
+if [ "$TOOL_SOURCES_EXPLICIT" -eq 1 ]; then
+    PREFLIGHT_ARGS+=(
+        --tool-sources "$TOOL_SOURCES_FILE"
+    )
+fi
+
+
+if [ -n "$PLATFORM_FILTER" ]; then
+    PREFLIGHT_ARGS+=(
+        --platform "$PLATFORM_FILTER"
+    )
+fi
+
+
+"$SOURCE_VALIDATOR" \
+    "${PREFLIGHT_ARGS[@]}" \
+    >/dev/null
 
 
 # ----------------------------------------------------------------------
@@ -900,16 +858,12 @@ command -v mktemp >/dev/null 2>&1 || \
 # ----------------------------------------------------------------------
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-
-    fail \
-        "invalid workspace name: $WORKSPACE_NAME"
-
+    fail "invalid workspace name: $WORKSPACE_NAME"
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail \
-        "workspace root not found: $WORKSPACE_ROOT"
+    fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -918,24 +872,15 @@ WORKSPACE_ROOT="$(
 )"
 
 WORKSPACE_DIR="$WORKSPACE_ROOT/$WORKSPACE_NAME"
-
 WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
-
 ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
-TOOLS_DIR="$WORKSPACE_DIR/tools"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
-    fail \
-        "workspace configuration not found: $WORKSPACE_FILE"
+    fail "workspace configuration not found: $WORKSPACE_FILE"
 
 [ -d "$ARTIFACTS_DIR" ] || \
-    fail \
-        "artifact directory not found: $ARTIFACTS_DIR"
-
-[ -d "$TOOLS_DIR" ] || \
-    fail \
-        "tools directory not found: $TOOLS_DIR"
+    fail "artifact directory not found: $ARTIFACTS_DIR"
 
 
 # ----------------------------------------------------------------------
@@ -950,19 +895,14 @@ CONFIG_PATH="$(
 
 
 if [[ "$CONFIG_PATH" = /* ]]; then
-
     CONFIG_DIR_CANDIDATE="$CONFIG_PATH"
-
 else
-
     CONFIG_DIR_CANDIDATE="$WORKSPACE_DIR/$CONFIG_PATH"
-
 fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail \
-        "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -972,18 +912,16 @@ CONFIG_DIR="$(
 
 
 # ----------------------------------------------------------------------
-# Discover cluster documents
+# Configuration discovery
 # ----------------------------------------------------------------------
 
 mapfile -d '' -t CONFIG_FILES < <(
-
     find "$CONFIG_DIR" \
         -maxdepth 1 \
         \( -type f -o -type l \) \
         -name '*.json' \
         -print0 |
     sort -z
-
 )
 
 
@@ -996,66 +934,127 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
     )"
 
 
-    if [ "$CONFIG_SCHEMA" = "$CLUSTER_SCHEMA" ]; then
+    case "$CONFIG_SCHEMA" in
 
-        CLUSTER_FILES+=(
-            "$CONFIG_FILE"
-        )
+        "$CLUSTER_SCHEMA")
+            CLUSTER_FILES+=("$CONFIG_FILE")
+            ;;
 
-    fi
+
+        "$TOOL_SOURCES_SCHEMA")
+            TOOL_SOURCE_FILES+=("$CONFIG_FILE")
+            ;;
+
+    esac
 
 done
 
 
 # ----------------------------------------------------------------------
-# Platform selection
-#
-# Default:
-#   current host platform
-#
-# Explicit:
-#   --platform windows-amd64
-#
-# Everything:
-#   --all-platforms
+# Source override selection
 # ----------------------------------------------------------------------
 
-if [ "$ALL_PLATFORMS" -eq 0 ] &&
-   [ -z "$PLATFORM_FILTER" ]
-then
+[ -f "$DEFAULT_SOURCES_FILE" ] || \
+    fail "default tool source configuration not found: $DEFAULT_SOURCES_FILE"
 
-    PLATFORM_FILTER="$(
-        detect_host_platform
+
+if [ "$TOOL_SOURCES_EXPLICIT" -eq 1 ]; then
+
+    [ -f "$TOOL_SOURCES_FILE" ] || \
+        fail "tool source override not found: $TOOL_SOURCES_FILE"
+
+    TOOL_SOURCES_FILE="$(
+        canonical_file "$TOOL_SOURCES_FILE"
     )"
-
-    PLATFORM_DESCRIPTION="$PLATFORM_FILTER (current host)"
-
-
-elif [ "$ALL_PLATFORMS" -eq 1 ]; then
-
-    PLATFORM_DESCRIPTION="all cluster toolPlatforms"
 
 
 else
 
-    PLATFORM_DESCRIPTION="$PLATFORM_FILTER"
+    case "${#TOOL_SOURCE_FILES[@]}" in
+
+        0)
+            TOOL_SOURCES_FILE=""
+            ;;
+
+
+        1)
+            TOOL_SOURCES_FILE="${TOOL_SOURCE_FILES[0]}"
+            ;;
+
+
+        *)
+            fail "multiple $TOOL_SOURCES_SCHEMA documents found"
+            ;;
+
+    esac
 
 fi
 
 
 # ----------------------------------------------------------------------
-# Build unique installation plan
+# Effective tool sources
+# ----------------------------------------------------------------------
+
+if [ -n "$TOOL_SOURCES_FILE" ]; then
+
+    EFFECTIVE_JSON="$(
+        jq -s '
+
+            def deepmerge($base; $override):
+
+                reduce ($override | keys_unsorted[]) as $key
+                    (
+                        $base;
+
+                        if $key == "auth" then
+                            .[$key] = $override[$key]
+
+                        elif
+                            ((.[$key] | type) == "object")
+                            and
+                            (($override[$key] | type) == "object")
+                        then
+                            .[$key] =
+                                deepmerge(
+                                    .[$key];
+                                    $override[$key]
+                                )
+
+                        else
+                            .[$key] = $override[$key]
+
+                        end
+                    );
+
+            deepmerge(.[0]; .[1])
+
+        ' \
+        "$DEFAULT_SOURCES_FILE" \
+        "$TOOL_SOURCES_FILE"
+    )"
+
+
+else
+
+    EFFECTIVE_JSON="$(
+        jq '.' "$DEFAULT_SOURCES_FILE"
+    )"
+
+fi
+
+
+# ----------------------------------------------------------------------
+# Build unique artifact plan
 #
-# Identity:
+# Artifact identity:
 #
 #   tool + version + platform
 #
-# Cluster name is only a consumer.
+# Cluster names are consumers of an artifact, not part of its identity.
 # ----------------------------------------------------------------------
 
 PLAN_FILE="$(
-    mktemp \
-        "$RUNTIME_DIR/install-plan.XXXXXX"
+    mktemp
 )"
 
 
@@ -1073,13 +1072,10 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         TOOL_VERSION \
         TOOL_PLATFORM
     do
-
-        [ -n "$TOOL_NAME" ] || \
-            continue
+        [ -n "$TOOL_NAME" ] || continue
 
 
         CLUSTER_BINDINGS=$((CLUSTER_BINDINGS + 1))
-
 
         REQUIREMENT_KEY="${TOOL_NAME}"$'\x1f'"${TOOL_VERSION}"$'\x1f'"${TOOL_PLATFORM}"
 
@@ -1087,9 +1083,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         if [[ -z "${REQUIREMENTS[$REQUIREMENT_KEY]+x}" ]]; then
 
             REQUIREMENTS["$REQUIREMENT_KEY"]=1
-
             REQUIREMENT_CLUSTERS["$REQUIREMENT_KEY"]="$CLUSTER_NAME"
-
 
             printf '%s\t%s\t%s\n' \
                 "$TOOL_NAME" \
@@ -1102,34 +1096,27 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
             CURRENT_CLUSTERS="${REQUIREMENT_CLUSTERS[$REQUIREMENT_KEY]}"
 
-
             case ",$CURRENT_CLUSTERS," in
-
                 *",$CLUSTER_NAME,"*)
                     ;;
 
-
                 *)
-
                     REQUIREMENT_CLUSTERS["$REQUIREMENT_KEY"]="${CURRENT_CLUSTERS},${CLUSTER_NAME}"
                     ;;
-
             esac
 
         fi
 
     done < <(
-
         jq -r \
-            --arg platformFilter "$PLATFORM_FILTER" \
-            --argjson allPlatforms "$ALL_PLATFORMS" '
+            --arg platformFilter "$PLATFORM_FILTER" '
 
             .toolPlatforms[] as $platform
 
             |
 
             select(
-                ($allPlatforms == 1)
+                $platformFilter == ""
                 or
                 $platform == $platformFilter
             )
@@ -1150,7 +1137,6 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
             | @tsv
 
         ' "$CLUSTER_FILE"
-
     )
 
 done
@@ -1168,41 +1154,48 @@ PLANNED="${#REQUIREMENTS[@]}"
 # Header
 # ----------------------------------------------------------------------
 
-echo "$PROJECT_NAME tool installation"
+echo "$PROJECT_NAME artifact fetch"
 
 echo
 echo "Repository : $REPO_ROOT"
 echo "Workspace  : $WORKSPACE_DIR"
 echo "Config dir : $CONFIG_DIR"
 echo "Artifacts  : $ARTIFACTS_DIR"
-echo "Tools      : $TOOLS_DIR"
-echo "Platform   : $PLATFORM_DESCRIPTION"
+
+if [ -n "$TOOL_SOURCES_FILE" ]; then
+    echo "Override   : $TOOL_SOURCES_FILE"
+else
+    echo "Override   : none"
+fi
+
+if [ -n "$PLATFORM_FILTER" ]; then
+    echo "Platform   : $PLATFORM_FILTER"
+else
+    echo "Platform   : all cluster toolPlatforms"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "Mode       : dry-run"
 else
-    echo "Mode       : install"
+    echo "Mode       : fetch"
 fi
 
 
 echo
-echo "Installation plan:"
+echo "Artifact plan:"
 echo "  cluster bindings : $CLUSTER_BINDINGS"
-echo "  unique tools     : $PLANNED"
+echo "  unique artifacts : $PLANNED"
 
 
 if [ "$PLANNED" -eq 0 ]; then
-
     echo
-    echo "Nothing to install."
-
+    echo "Nothing to fetch."
     exit 0
-
 fi
 
 
 # ----------------------------------------------------------------------
-# Install
+# Fetch requirements
 # ----------------------------------------------------------------------
 
 while IFS=$'\t' read -r \
@@ -1210,26 +1203,14 @@ while IFS=$'\t' read -r \
     TOOL_VERSION \
     TOOL_PLATFORM
 do
-
-    [ -n "$TOOL_NAME" ] || \
-        continue
+    [ -n "$TOOL_NAME" ] || continue
 
 
-    safe_component "$TOOL_NAME" || \
-        fail \
-            "unsafe tool name: $TOOL_NAME"
-
-    safe_component "$TOOL_VERSION" || \
-        fail \
-            "unsafe tool version: $TOOL_VERSION"
-
-    safe_component "$TOOL_PLATFORM" || \
-        fail \
-            "unsafe tool platform: $TOOL_PLATFORM"
+    safe_version "$TOOL_VERSION" || \
+        fail "unsafe tool version '$TOOL_VERSION' for tool '$TOOL_NAME'"
 
 
     REQUIREMENT_KEY="${TOOL_NAME}"$'\x1f'"${TOOL_VERSION}"$'\x1f'"${TOOL_PLATFORM}"
-
 
     REQUIRED_BY="$(
         sorted_cluster_list \
@@ -1237,11 +1218,96 @@ do
     )"
 
 
-    ARTIFACT_DIR="$ARTIFACTS_DIR/$TOOL_PLATFORM/$TOOL_NAME/$TOOL_VERSION"
-    ARTIFACT_MANIFEST="$ARTIFACT_DIR/manifest.json"
+    ARTIFACT_URL_TEMPLATE="$(
+        jq -r \
+            --arg tool "$TOOL_NAME" \
+            --arg platform "$TOOL_PLATFORM" '
+            .sources[$tool]
+            .platforms[$platform]
+            .artifact.url
+        ' <<< "$EFFECTIVE_JSON"
+    )"
 
 
-    FINAL_PARENT="$TOOLS_DIR/$TOOL_PLATFORM/$TOOL_NAME"
+    ARTIFACT_TYPE="$(
+        jq -r \
+            --arg tool "$TOOL_NAME" \
+            --arg platform "$TOOL_PLATFORM" '
+            .sources[$tool]
+            .platforms[$platform]
+            .artifact.type
+        ' <<< "$EFFECTIVE_JSON"
+    )"
+
+
+    ARTIFACT_BINARY="$(
+        jq -r \
+            --arg tool "$TOOL_NAME" \
+            --arg platform "$TOOL_PLATFORM" '
+            .sources[$tool]
+            .platforms[$platform]
+            .artifact.binary
+        ' <<< "$EFFECTIVE_JSON"
+    )"
+
+
+    CHECKSUM_URL_TEMPLATE="$(
+        jq -r \
+            --arg tool "$TOOL_NAME" \
+            --arg platform "$TOOL_PLATFORM" '
+            .sources[$tool]
+            .platforms[$platform]
+            .checksum.url
+        ' <<< "$EFFECTIVE_JSON"
+    )"
+
+
+    CHECKSUM_TYPE="$(
+        jq -r \
+            --arg tool "$TOOL_NAME" \
+            --arg platform "$TOOL_PLATFORM" '
+            .sources[$tool]
+            .platforms[$platform]
+            .checksum.type
+        ' <<< "$EFFECTIVE_JSON"
+    )"
+
+
+    ARTIFACT_URL="$(
+        resolve_version_url \
+            "$ARTIFACT_URL_TEMPLATE" \
+            "$TOOL_VERSION"
+    )"
+
+
+    CHECKSUM_URL="$(
+        resolve_version_url \
+            "$CHECKSUM_URL_TEMPLATE" \
+            "$TOOL_VERSION"
+    )"
+
+
+    ARTIFACT_FILENAME="$(
+        url_basename "$ARTIFACT_URL"
+    )"
+
+
+    CHECKSUM_FILENAME="$(
+        url_basename "$CHECKSUM_URL"
+    )"
+
+
+    safe_filename "$ARTIFACT_FILENAME" || \
+        fail "unsafe artifact filename resolved from URL: $ARTIFACT_URL"
+
+    safe_filename "$CHECKSUM_FILENAME" || \
+        fail "unsafe checksum filename resolved from URL: $CHECKSUM_URL"
+
+    [ "$ARTIFACT_FILENAME" != "$CHECKSUM_FILENAME" ] || \
+        fail "artifact and checksum resolve to the same filename: $ARTIFACT_FILENAME"
+
+
+    FINAL_PARENT="$ARTIFACTS_DIR/$TOOL_PLATFORM/$TOOL_NAME"
     FINAL_DIR="$FINAL_PARENT/$TOOL_VERSION"
 
 
@@ -1256,252 +1322,137 @@ do
     echo "  required by : $REQUIRED_BY"
 
 
-    # ------------------------------------------------------------------
-    # Artifact must already exist.
-    # ------------------------------------------------------------------
-
-    [ -d "$ARTIFACT_DIR" ] || \
-        fail \
-            "required artifact is missing: $ARTIFACT_DIR; run './kubebase.sh fetch --platform $TOOL_PLATFORM'"
-
-
-    # ------------------------------------------------------------------
-    # Reverify downloaded artifact before using it.
-    # ------------------------------------------------------------------
-
-    if ! verify_artifact_store \
-        "$ARTIFACT_DIR" \
-        "$TOOL_NAME" \
-        "$TOOL_VERSION" \
-        "$TOOL_PLATFORM"
-    then
-
-        fail \
-            "artifact verification failed: $ARTIFACT_DIR"
-
-    fi
-
-
-    ARTIFACT_FILE="$(
-        jq -r '
-            .artifact.file
-        ' "$ARTIFACT_MANIFEST"
-    )"
-
-    ARTIFACT_TYPE="$(
-        jq -r '
-            .artifact.type
-        ' "$ARTIFACT_MANIFEST"
-    )"
-
-    SOURCE_BINARY="$(
-        jq -r '
-            .artifact.binary
-        ' "$ARTIFACT_MANIFEST"
-    )"
-
-    ARTIFACT_SHA256="$(
-        jq -r '
-            .artifact.sha256
-        ' "$ARTIFACT_MANIFEST"
-    )"
-
-    ARTIFACT_SHA256="${ARTIFACT_SHA256,,}"
-
-
-    INSTALLED_FILE="$(
-        installed_filename \
-            "$TOOL_NAME" \
-            "$SOURCE_BINARY"
-    )"
-
-
-    echo "  artifact    : verified"
-    echo "  source      : $ARTIFACT_DIR/$ARTIFACT_FILE"
-
-
-    # ------------------------------------------------------------------
-    # Existing installation
-    # ------------------------------------------------------------------
-
     if [ -d "$FINAL_DIR" ]; then
 
-        if verify_existing_install \
+        if verify_existing_artifact \
             "$FINAL_DIR" \
             "$TOOL_NAME" \
             "$TOOL_VERSION" \
-            "$TOOL_PLATFORM" \
-            "$ARTIFACT_SHA256"
+            "$TOOL_PLATFORM"
         then
-
-            echo "  status      : already installed in shared store"
-            echo "  location    : $FINAL_DIR/$INSTALLED_FILE"
+            echo "  status      : already verified in shared store"
+            echo "  location    : $FINAL_DIR"
 
             EXISTING=$((EXISTING + 1))
-
             continue
-
         fi
 
 
-        fail \
-            "existing tool installation is incomplete or corrupt: $FINAL_DIR"
-
+        fail "existing artifact directory is incomplete or corrupt: $FINAL_DIR"
     fi
 
 
     if [ -e "$FINAL_DIR" ]; then
-
-        fail \
-            "tool destination exists and is not a directory: $FINAL_DIR"
-
+        fail "artifact destination exists and is not a directory: $FINAL_DIR"
     fi
 
 
-    # ------------------------------------------------------------------
-    # Dry run stops before filesystem mutation.
-    # ------------------------------------------------------------------
+    echo "  artifact    : $ARTIFACT_URL"
+    echo "  checksum    : $CHECKSUM_URL"
+
 
     if [ "$DRY_RUN" -eq 1 ]; then
-
-        echo "  status      : would install"
-        echo "  location    : $FINAL_DIR/$INSTALLED_FILE"
-
+        echo "  status      : would fetch"
         continue
-
     fi
 
 
     # ------------------------------------------------------------------
-    # Temporary staging directory
+    # Stage
     # ------------------------------------------------------------------
 
     ACTIVE_STAGE="$(
         mktemp -d \
-            "$TOOLS_DIR/.install-${TOOL_NAME}-${TOOL_PLATFORM}.XXXXXX"
+            "$ARTIFACTS_DIR/.fetch-${TOOL_NAME}-${TOOL_PLATFORM}.XXXXXX"
     )"
 
 
-    STAGED_BINARY="$ACTIVE_STAGE/$INSTALLED_FILE"
+    ACTIVE_AUTH_FILE="$(
+        mktemp
+    )"
+
+
+    prepare_auth_file \
+        "$TOOL_NAME" \
+        "$ACTIVE_AUTH_FILE"
+
+
+    STAGED_ARTIFACT="$ACTIVE_STAGE/$ARTIFACT_FILENAME"
+    STAGED_CHECKSUM="$ACTIVE_STAGE/$CHECKSUM_FILENAME"
 
 
     # ------------------------------------------------------------------
-    # Extract/copy only the declared binary.
-    #
-    # We do not unpack whole archives into the workspace.
+    # Download
     # ------------------------------------------------------------------
 
-    case "$ARTIFACT_TYPE" in
+    echo "  download    : artifact"
 
-        binary)
-
-            cp \
-                -- "$ARTIFACT_DIR/$ARTIFACT_FILE" \
-                "$STAGED_BINARY"
-            ;;
+    download_file \
+        "$ARTIFACT_URL" \
+        "$STAGED_ARTIFACT"
 
 
-        tar.gz)
+    echo "  download    : checksum"
 
-            command -v tar >/dev/null 2>&1 || \
-                fail \
-                    "tar is required to install $TOOL_NAME"
-
-
-            TAR_MEMBER="$(
-                find_tar_member \
-                    "$ARTIFACT_DIR/$ARTIFACT_FILE" \
-                    "$SOURCE_BINARY"
-            )"
-
-
-            [ -n "$TAR_MEMBER" ] || \
-                fail \
-                    "binary '$SOURCE_BINARY' not found in archive: $ARTIFACT_FILE"
-
-
-            tar \
-                --warning=no-unknown-keyword \
-                -xOzf "$ARTIFACT_DIR/$ARTIFACT_FILE" \
-                -- "$TAR_MEMBER" \
-                > "$STAGED_BINARY"
-            ;;
-
-
-        zip)
-
-            command -v unzip >/dev/null 2>&1 || \
-                fail \
-                    "unzip is required to install $TOOL_NAME"
-
-
-            ZIP_MEMBER="$(
-                find_zip_member \
-                    "$ARTIFACT_DIR/$ARTIFACT_FILE" \
-                    "$SOURCE_BINARY"
-            )"
-
-
-            [ -n "$ZIP_MEMBER" ] || \
-                fail \
-                    "binary '$SOURCE_BINARY' not found in archive: $ARTIFACT_FILE"
-
-
-            unzip \
-                -p "$ARTIFACT_DIR/$ARTIFACT_FILE" \
-                "$ZIP_MEMBER" \
-                > "$STAGED_BINARY"
-            ;;
-
-
-        *)
-
-            fail \
-                "unsupported artifact type '$ARTIFACT_TYPE' for $TOOL_NAME"
-            ;;
-
-    esac
+    download_file \
+        "$CHECKSUM_URL" \
+        "$STAGED_CHECKSUM"
 
 
     # ------------------------------------------------------------------
-    # Extracted binary validation
+    # SHA-256 verification
     # ------------------------------------------------------------------
 
-    [ -s "$STAGED_BINARY" ] || \
-        fail \
-            "installed binary is empty: $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
+    if ! EXPECTED_SHA256="$(
+        extract_expected_sha256 \
+            "$CHECKSUM_TYPE" \
+            "$STAGED_CHECKSUM" \
+            "$ARTIFACT_FILENAME"
+    )"
+    then
+        fail "unable to extract SHA-256 for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
+    fi
 
 
-    chmod 755 \
-        "$STAGED_BINARY"
-
-
-    BINARY_SHA256="$(
-        sha256sum "$STAGED_BINARY" |
+    ACTUAL_SHA256="$(
+        sha256sum "$STAGED_ARTIFACT" |
         awk '{print $1}'
     )"
 
-    BINARY_SHA256="${BINARY_SHA256,,}"
+    ACTUAL_SHA256="${ACTUAL_SHA256,,}"
+
+
+    if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+        fail "SHA-256 mismatch for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
+    fi
+
+
+    echo "  sha256      : $ACTUAL_SHA256"
 
 
     # ------------------------------------------------------------------
-    # Installation manifest
+    # Manifest
     #
-    # This links the installed binary to the verified source artifact.
-    # requiredBy is intentionally not stored.
+    # requiredBy is intentionally not stored here.
+    #
+    # The manifest describes the immutable artifact itself.
+    # Cluster consumers can change independently.
     # ------------------------------------------------------------------
 
     jq -n \
-        --arg schema "$INSTALL_SCHEMA" \
-        --argjson schemaVersion "$INSTALL_SCHEMA_VERSION" \
+        --arg schema "$ARTIFACT_SCHEMA" \
+        --argjson schemaVersion "$ARTIFACT_SCHEMA_VERSION" \
         --arg tool "$TOOL_NAME" \
         --arg version "$TOOL_VERSION" \
         --arg platform "$TOOL_PLATFORM" \
-        --arg artifactSha256 "$ARTIFACT_SHA256" \
-        --arg artifactFile "$ARTIFACT_FILE" \
-        --arg sourceBinary "$SOURCE_BINARY" \
-        --arg binaryFile "$INSTALLED_FILE" \
-        --arg binarySha256 "$BINARY_SHA256" '
+        --arg artifactFile "$ARTIFACT_FILENAME" \
+        --arg artifactUrl "$ARTIFACT_URL" \
+        --arg artifactType "$ARTIFACT_TYPE" \
+        --arg artifactBinary "$ARTIFACT_BINARY" \
+        --arg artifactSha256 "$ACTUAL_SHA256" \
+        --arg checksumFile "$CHECKSUM_FILENAME" \
+        --arg checksumUrl "$CHECKSUM_URL" \
+        --arg checksumType "$CHECKSUM_TYPE" '
 
         {
             schema: $schema,
@@ -1513,13 +1464,16 @@ do
 
             artifact: {
                 file: $artifactFile,
+                url: $artifactUrl,
+                type: $artifactType,
+                binary: $artifactBinary,
                 sha256: $artifactSha256
             },
 
-            binary: {
-                sourcePath: $sourceBinary,
-                file: $binaryFile,
-                sha256: $binarySha256
+            checksum: {
+                file: $checksumFile,
+                url: $checksumUrl,
+                type: $checksumType
             }
         }
 
@@ -1527,6 +1481,8 @@ do
 
 
     chmod 644 \
+        "$STAGED_ARTIFACT" \
+        "$STAGED_CHECKSUM" \
         "$ACTIVE_STAGE/manifest.json"
 
     chmod 755 \
@@ -1534,18 +1490,16 @@ do
 
 
     # ------------------------------------------------------------------
-    # Atomic commit
+    # Commit
+    #
+    # FINAL_DIR appears only after a fully verified download.
     # ------------------------------------------------------------------
 
-    mkdir -p \
-        -- "$FINAL_PARENT"
+    mkdir -p -- "$FINAL_PARENT"
 
 
     if [ -e "$FINAL_DIR" ]; then
-
-        fail \
-            "tool destination appeared during installation: $FINAL_DIR"
-
+        fail "artifact destination appeared during fetch: $FINAL_DIR"
     fi
 
 
@@ -1557,13 +1511,15 @@ do
     ACTIVE_STAGE=""
 
 
-    echo "  binary      : $INSTALLED_FILE"
-    echo "  sha256      : $BINARY_SHA256"
-    echo "  status      : installed and verified"
-    echo "  location    : $FINAL_DIR/$INSTALLED_FILE"
+    rm -f -- "$ACTIVE_AUTH_FILE"
+    ACTIVE_AUTH_FILE=""
 
 
-    INSTALLED=$((INSTALLED + 1))
+    echo "  status      : fetched and verified"
+    echo "  location    : $FINAL_DIR"
+
+
+    FETCHED=$((FETCHED + 1))
 
 done < "$PLAN_FILE"
 
@@ -1573,13 +1529,13 @@ done < "$PLAN_FILE"
 # ----------------------------------------------------------------------
 
 echo
-echo "Tool installation complete."
+echo "Artifact fetch complete."
 
 echo
 echo "Summary:"
 echo "  cluster bindings : $CLUSTER_BINDINGS"
-echo "  unique tools     : $PLANNED"
-echo "  installed        : $INSTALLED"
+echo "  unique artifacts : $PLANNED"
+echo "  fetched          : $FETCHED"
 echo "  existing         : $EXISTING"
 
 if [ "$DRY_RUN" -eq 1 ]; then
