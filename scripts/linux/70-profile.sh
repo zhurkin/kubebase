@@ -12,7 +12,7 @@ set -euo pipefail
 #
 #   cluster + user
 #
-# Namespace/project navigation is layered on top by Step 80. Step 70
+# Namespace/group navigation is layered on top by Step 80. Step 70
 # owns only the connection identity, kubeconfig selection and cluster
 # toolchain.
 # ----------------------------------------------------------------------
@@ -971,9 +971,9 @@ create_profile_session()
                 effective: $effectiveKubeconfig
             },
             navigation: {
-                projectFilter: null,
+                groupFilter: null,
                 namespace: (if $contextNamespace == "" then null else $contextNamespace end),
-                namespaceProject: null
+                namespaceGroup: null
             },
             toolchain: $toolchain
         }
@@ -1204,8 +1204,12 @@ command_emit_use()
     shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
     shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
 
-    # Compatibility cleanup for pre-convergence Step 80 shells.
+    # Navigation starts clean for every newly activated profile.
     shell_unset "KUBEBASE_SCOPE"
+    shell_unset "KUBEBASE_GROUP"
+    shell_unset "KUBEBASE_NAMESPACE_GROUP"
+
+    # Compatibility cleanup for older Step 80 shells.
     shell_unset "KUBEBASE_PROJECT"
     shell_unset "KUBEBASE_NAMESPACE_PROJECT"
 
@@ -1261,12 +1265,16 @@ command_current()
         )"
     fi
 
-    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        echo "Project   : $KUBEBASE_PROJECT (filter)"
+    if [ -n "${KUBEBASE_GROUP:-}" ]; then
+        echo "Group     : $KUBEBASE_GROUP (filter)"
+    elif [ -n "${KUBEBASE_NAMESPACE_GROUP:-}" ]; then
+        echo "Group     : $KUBEBASE_NAMESPACE_GROUP (namespace)"
+    elif [ -n "${KUBEBASE_PROJECT:-}" ]; then
+        echo "Group     : $KUBEBASE_PROJECT (legacy filter)"
     elif [ -n "${KUBEBASE_NAMESPACE_PROJECT:-}" ]; then
-        echo "Project   : $KUBEBASE_NAMESPACE_PROJECT (namespace)"
+        echo "Group     : $KUBEBASE_NAMESPACE_PROJECT (legacy namespace)"
     else
-        echo "Project   : (none)"
+        echo "Group     : (none)"
     fi
 
     if [ -n "$namespace" ]; then
@@ -1453,17 +1461,17 @@ kubebase()
             "$KUBEBASE_ENTRYPOINT" current
             ;;
 
-        project)
+        group|project)
             shift || true
 
             if [ "$#" -gt 1 ]; then
-                echo "ERROR: usage: kubebase project [PROJECT|--clear]" >&2
+                echo "ERROR: usage: kubebase group [GROUP|--clear]" >&2
                 return 2
             fi
 
             __kb_code="$(
                 "$KUBEBASE_ENTRYPOINT" \
-                    __nav-project \
+                    __nav-group \
                     "${1:-}"
             )"
             __kb_status=$?
@@ -1473,14 +1481,14 @@ kubebase()
             fi
 
             if ! eval "$__kb_code"; then
-                echo "ERROR: failed to update KubeBase project navigation" >&2
+                echo "ERROR: failed to update KubeBase group navigation" >&2
                 return 1
             fi
 
             "$KUBEBASE_ENTRYPOINT" current
             ;;
 
-        namespaces|projects)
+        namespaces|groups|projects)
             "$KUBEBASE_ENTRYPOINT" "$@"
             ;;
 
@@ -1522,8 +1530,10 @@ kubebase()
             unset KUBEBASE_EFFECTIVE_KUBECONFIG
             unset KUBEBASE_SESSION_DIR
             unset KUBEBASE_SCOPE
-            unset KUBEBASE_PROJECT
+            unset KUBEBASE_GROUP
             unset KUBEBASE_NAMESPACE
+            unset KUBEBASE_NAMESPACE_GROUP
+            unset KUBEBASE_PROJECT
             unset KUBEBASE_NAMESPACE_PROJECT
 
             if [ -n "$__kb_old_session" ]; then
