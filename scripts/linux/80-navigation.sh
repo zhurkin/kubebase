@@ -5,7 +5,7 @@ set -euo pipefail
 
 # ----------------------------------------------------------------------
 # KubeBase
-# Step 80 - Namespace and Rancher project navigation
+# Step 80 - Namespace and optional group navigation
 # Linux / Bash
 #
 # Namespace inventory is live by default. Discovery is capability-based:
@@ -26,7 +26,7 @@ set -euo pipefail
 PROJECT_NAME="KubeBase"
 
 INVENTORY_SCHEMA="kubebase.namespaceInventory"
-INVENTORY_SCHEMA_VERSION=1
+INVENTORY_SCHEMA_VERSION=2
 
 SESSION_SCHEMA="kubebase.session"
 SESSION_SCHEMA_VERSION=1
@@ -106,7 +106,7 @@ namespace_name_is_valid()
 }
 
 
-project_id_from_namespace_json()
+group_id_from_namespace_json()
 {
     jq -r '
         (
@@ -245,7 +245,7 @@ cache_is_valid()
         --arg context "$KUBEBASE_CONTEXT" '
         .schema == $schema
         and
-        .schemaVersion == $version
+        (.schemaVersion == 1 or .schemaVersion == $version)
         and
         .profile.cluster == $cluster
         and
@@ -262,7 +262,18 @@ load_cache()
 {
     cache_is_valid || return 1
 
-    INVENTORY_JSON="$(cat -- "$CACHE_FILE")"
+    INVENTORY_JSON="$(
+        jq \
+            --argjson version "$INVENTORY_SCHEMA_VERSION" '
+            .schemaVersion = $version
+            | .entries |= map(
+                {
+                    name: .name,
+                    groupId: (.groupId // .projectId // null)
+                }
+            )
+        ' "$CACHE_FILE"
+    )"
     INVENTORY_SOURCE="cache"
     INVENTORY_METHOD="$(jq -r '.method // "unknown"' <<< "$INVENTORY_JSON")"
     INVENTORY_COMPLETE="$(jq -r '.complete // false' <<< "$INVENTORY_JSON")"
@@ -333,7 +344,7 @@ entries_from_namespace_list()
             |
             {
                 name: .metadata.name,
-                projectId: (
+                groupId: (
                     .metadata.labels["field.cattle.io/projectId"]
                     //
                     (
@@ -362,7 +373,7 @@ live_discover_inventory()
     local candidate_json
     local candidate_error
     local candidate_error_file
-    local project_id
+    local group_id
     local entries_file
     local entries_json
     local timestamp
@@ -425,9 +436,9 @@ live_discover_inventory()
     review_error_file="$(mktemp)"
 
     # Use kubectl's supported authorization command rather than constructing
-    # SelfSubjectRulesReview with `create --raw`. Rancher proxy endpoints can
-    # reject the raw POST even though `kubectl auth can-i --list` succeeds for
-    # the same kubeconfig and identity.
+    # SelfSubjectRulesReview with `create --raw`. Some API gateways can reject
+    # the raw POST even though `kubectl auth can-i --list` succeeds for the
+    # same kubeconfig and identity.
     if ! review_text="$(
         "$KUBECTL_BIN" \
             --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
@@ -487,15 +498,15 @@ live_discover_inventory()
             -o json \
             2>"$candidate_error_file")"
         then
-            project_id="$(project_id_from_namespace_json <<< "$candidate_json")"
+            group_id="$(group_id_from_namespace_json <<< "$candidate_json")"
 
             jq -cn \
                 --arg name "$candidate" \
-                --arg projectId "$project_id" '
+                --arg groupId "$group_id" '
                 {
                     name: $name,
-                    projectId: (
-                        if $projectId == "" then null else $projectId end
+                    groupId: (
+                        if $groupId == "" then null else $groupId end
                     )
                 }
             ' >> "$entries_file"
@@ -582,13 +593,13 @@ inventory_entry_for_name()
 }
 
 
-inventory_project_exists()
+inventory_group_exists()
 {
-    local project="$1"
+    local group="$1"
 
     jq -e \
-        --arg project "$project" '
-        any(.entries[]; .projectId == $project)
+        --arg group "$group" '
+        any(.entries[]; .groupId == $group)
     ' <<< "$INVENTORY_JSON" >/dev/null 2>&1
 }
 
@@ -599,25 +610,25 @@ inventory_project_exists()
 
 update_session_navigation()
 {
-    local project_filter="$1"
+    local group_filter="$1"
     local namespace="$2"
-    local namespace_project="$3"
+    local namespace_group="$3"
     local manifest="$KUBEBASE_SESSION_DIR/session.json"
     local temp="$KUBEBASE_SESSION_DIR/.session.json.tmp.$$"
 
     jq \
-        --arg projectFilter "$project_filter" \
+        --arg groupFilter "$group_filter" \
         --arg namespace "$namespace" \
-        --arg namespaceProject "$namespace_project" '
+        --arg namespaceGroup "$namespace_group" '
         .navigation = {
-            projectFilter: (
-                if $projectFilter == "" then null else $projectFilter end
+            groupFilter: (
+                if $groupFilter == "" then null else $groupFilter end
             ),
             namespace: (
                 if $namespace == "" then null else $namespace end
             ),
-            namespaceProject: (
-                if $namespaceProject == "" then null else $namespaceProject end
+            namespaceGroup: (
+                if $namespaceGroup == "" then null else $namespaceGroup end
             )
         }
         | del(.scope)
@@ -702,13 +713,13 @@ inventory_namespace_count()
 }
 
 
-inventory_project_count()
+inventory_group_count()
 {
     jq -r '
         [
             .entries[]
-            | select(.projectId != null and .projectId != "")
-            | .projectId
+            | select(.groupId != null and .groupId != "")
+            | .groupId
         ]
         | unique
         | length
@@ -719,12 +730,12 @@ inventory_project_count()
 print_discovery_summary()
 {
     local namespace_count
-    local project_count
+    local group_count
     local source_text
     local list_text
 
     namespace_count="$(inventory_namespace_count)"
-    project_count="$(inventory_project_count)"
+    group_count="$(inventory_group_count)"
 
     if [ "$INVENTORY_SOURCE" = "live" ]; then
         source_text="LIVE Kubernetes API"
@@ -765,10 +776,10 @@ print_discovery_summary()
         printf '  %-34s : %s\n' "Complete list guaranteed" "NO"
     fi
 
-    printf '  %-34s : %s\n' "Rancher projects discovered" "$project_count"
+    printf '  %-34s : %s\n' "Namespace groups discovered" "$group_count"
 
-    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        printf '  %-34s : %s\n' "Project filter" "$KUBEBASE_PROJECT"
+    if [ -n "${KUBEBASE_GROUP:-}" ]; then
+        printf '  %-34s : %s\n' "Group filter" "$KUBEBASE_GROUP"
     fi
 
     case "$INVENTORY_NOTE" in
@@ -797,18 +808,18 @@ print_inventory_header()
 
 print_namespace_table()
 {
-    local filter_project="${KUBEBASE_PROJECT:-}"
+    local filter_group="${KUBEBASE_GROUP:-}"
     local count
 
     count="$(
         jq -r \
-            --arg project "$filter_project" '
+            --arg group "$filter_group" '
             [
                 .entries[]
                 | select(
-                    $project == ""
+                    $group == ""
                     or
-                    .projectId == $project
+                    .groupId == $group
                 )
             ]
             | length
@@ -816,41 +827,41 @@ print_namespace_table()
     )"
 
     if [ "$count" -eq 0 ]; then
-        if [ -n "$filter_project" ]; then
-            echo "No namespaces discovered for project '$filter_project'."
+        if [ -n "$filter_group" ]; then
+            echo "No namespaces discovered for group '$filter_group'."
         else
             echo "No namespaces were discovered."
         fi
         return 0
     fi
 
-    printf '%-40s %s\n' "NAMESPACE" "PROJECT"
+    printf '%-40s %s\n' "NAMESPACE" "GROUP"
     printf '%-40s %s\n' "----------------------------------------" "--------------------"
 
     jq -r \
-        --arg project "$filter_project" '
+        --arg group "$filter_group" '
         .entries[]
         | select(
-            $project == ""
+            $group == ""
             or
-            .projectId == $project
+            .groupId == $group
         )
-        | [ .name, (.projectId // "-") ]
+        | [ .name, (.groupId // "-") ]
         | @tsv
     ' <<< "$INVENTORY_JSON" |
-    while IFS=$'\t' read -r name project; do
-        printf '%-40s %s\n' "$name" "$project"
+    while IFS=$'\t' read -r name group; do
+        printf '%-40s %s\n' "$name" "$group"
     done
 }
 
 
-print_project_table()
+print_group_table()
 {
     local count
 
-    count="$(inventory_project_count)"
+    count="$(inventory_group_count)"
 
-    echo "$PROJECT_NAME projects"
+    echo "$PROJECT_NAME groups"
     echo
     echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
     echo "Context : $KUBEBASE_CONTEXT"
@@ -858,26 +869,26 @@ print_project_table()
     print_discovery_summary
 
     if [ "$count" -eq 0 ]; then
-        echo "No Rancher project metadata was discovered."
+        echo "No namespace group metadata was discovered."
         return 0
     fi
 
-    printf '%-24s %s\n' "PROJECT" "NAMESPACES"
+    printf '%-24s %s\n' "GROUP" "NAMESPACES"
     printf '%-24s %s\n' "------------------------" "----------"
 
     jq -r '
         [
             .entries[]
-            | select(.projectId != null and .projectId != "")
+            | select(.groupId != null and .groupId != "")
         ]
-        | group_by(.projectId)
-        | sort_by(.[0].projectId)
+        | group_by(.groupId)
+        | sort_by(.[0].groupId)
         | .[]
-        | [ .[0].projectId, (length | tostring) ]
+        | [ .[0].groupId, (length | tostring) ]
         | @tsv
     ' <<< "$INVENTORY_JSON" |
-    while IFS=$'\t' read -r project count_value; do
-        printf '%-24s %s\n' "$project" "$count_value"
+    while IFS=$'\t' read -r group count_value; do
+        printf '%-24s %s\n' "$group" "$count_value"
     done
 }
 
@@ -895,12 +906,12 @@ command_namespaces()
 }
 
 
-command_projects()
+command_groups()
 {
     require_active_profile
     discover_inventory "$FORCE_CACHE"
 
-    print_project_table
+    print_group_table
 }
 
 
@@ -912,27 +923,27 @@ select_namespace_interactively()
 {
     local answer
     local index
-    local project_filter="${KUBEBASE_PROJECT:-}"
+    local group_filter="${KUBEBASE_GROUP:-}"
     local -a names=()
 
     discover_inventory 0
 
     mapfile -t names < <(
         jq -r \
-            --arg project "$project_filter" '
+            --arg group "$group_filter" '
             .entries[]
             | select(
-                $project == ""
+                $group == ""
                 or
-                .projectId == $project
+                .groupId == $group
             )
             | .name
         ' <<< "$INVENTORY_JSON"
     )
 
     [ "${#names[@]}" -gt 0 ] || {
-        if [ -n "$project_filter" ]; then
-            echo "ERROR: no namespaces discovered for project '$project_filter'" >&2
+        if [ -n "$group_filter" ]; then
+            echo "ERROR: no namespaces discovered for group '$group_filter'" >&2
         else
             echo "ERROR: no namespaces are available for selection" >&2
         fi
@@ -946,8 +957,8 @@ select_namespace_interactively()
     }
 
     {
-        if [ -n "$project_filter" ]; then
-            echo "Available namespaces in project '$project_filter':"
+        if [ -n "$group_filter" ]; then
+            echo "Available namespaces in group '$group_filter':"
         else
             echo "Available namespaces:"
         fi
@@ -979,64 +990,64 @@ select_namespace_interactively()
 }
 
 
-select_project_interactively()
+select_group_interactively()
 {
     local answer
     local index
-    local -a projects=()
+    local -a groups=()
 
     discover_inventory 0
 
-    mapfile -t projects < <(
+    mapfile -t groups < <(
         jq -r '
             [
                 .entries[]
-                | select(.projectId != null and .projectId != "")
-                | .projectId
+                | select(.groupId != null and .groupId != "")
+                | .groupId
             ]
             | unique
             | .[]
         ' <<< "$INVENTORY_JSON"
     )
 
-    [ "${#projects[@]}" -gt 0 ] || {
-        echo "ERROR: no Rancher projects were discovered" >&2
+    [ "${#groups[@]}" -gt 0 ] || {
+        echo "ERROR: no namespace groups were discovered" >&2
         return 1
     }
 
     [ -r /dev/tty ] && [ -w /dev/tty ] || {
-        echo "ERROR: interactive project selection requires a TTY" >&2
-        echo "Use: kubebase project PROJECT" >&2
+        echo "ERROR: interactive group selection requires a TTY" >&2
+        echo "Use: kubebase group GROUP" >&2
         return 1
     }
 
     {
-        echo "Available projects:"
+        echo "Available groups:"
         echo
 
         index=1
-        for project in "${projects[@]}"; do
-            printf '  %d. %s\n' "$index" "$project"
+        for group in "${groups[@]}"; do
+            printf '  %d. %s\n' "$index" "$group"
             index=$((index + 1))
         done
 
         echo
-        printf 'Select project [1-%d]: ' "${#projects[@]}"
+        printf 'Select group [1-%d]: ' "${#groups[@]}"
     } > /dev/tty
 
     IFS= read -r answer < /dev/tty
 
     [[ "$answer" =~ ^[0-9]+$ ]] || {
-        echo "ERROR: invalid project selection: $answer" >&2
+        echo "ERROR: invalid group selection: $answer" >&2
         return 1
     }
 
-    if [ "$answer" -lt 1 ] || [ "$answer" -gt "${#projects[@]}" ]; then
-        echo "ERROR: project selection is out of range: $answer" >&2
+    if [ "$answer" -lt 1 ] || [ "$answer" -gt "${#groups[@]}" ]; then
+        echo "ERROR: group selection is out of range: $answer" >&2
         return 1
     fi
 
-    printf '%s\n' "${projects[$((answer - 1))]}"
+    printf '%s\n' "${groups[$((answer - 1))]}"
 }
 
 
@@ -1048,7 +1059,7 @@ command_emit_namespace()
 {
     local selector="${1:-}"
     local namespace_json=""
-    local project_id=""
+    local group_id=""
     local error_file
     local error_text
     local cached_entry=""
@@ -1059,12 +1070,12 @@ command_emit_namespace()
         clear_effective_namespace
 
         update_session_navigation \
-            "${KUBEBASE_PROJECT:-}" \
+            "${KUBEBASE_GROUP:-}" \
             "" \
             ""
 
         shell_unset "KUBEBASE_NAMESPACE"
-        shell_unset "KUBEBASE_NAMESPACE_PROJECT"
+        shell_unset "KUBEBASE_NAMESPACE_GROUP"
         return 0
     fi
 
@@ -1087,7 +1098,7 @@ command_emit_namespace()
         -o json \
         2>"$error_file")"
     then
-        project_id="$(project_id_from_namespace_json <<< "$namespace_json")"
+        group_id="$(group_id_from_namespace_json <<< "$namespace_json")"
     else
         error_text="$(cat -- "$error_file")"
 
@@ -1101,7 +1112,7 @@ command_emit_namespace()
             cached_entry="$(inventory_entry_for_name "$selector")"
 
             if [ -n "$cached_entry" ]; then
-                project_id="$(jq -r '.projectId // ""' <<< "$cached_entry")"
+                group_id="$(jq -r '.groupId // ""' <<< "$cached_entry")"
             fi
         fi
 
@@ -1110,15 +1121,15 @@ command_emit_namespace()
 
     rm -f -- "$error_file"
 
-    if [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        if [ -z "$project_id" ]; then
-            echo "ERROR: cannot verify that namespace '$selector' belongs to active project '$KUBEBASE_PROJECT'" >&2
-            echo "Clear the project filter first with: kubebase project --clear" >&2
+    if [ -n "${KUBEBASE_GROUP:-}" ]; then
+        if [ -z "$group_id" ]; then
+            echo "ERROR: cannot verify that namespace '$selector' belongs to active group '$KUBEBASE_GROUP'" >&2
+            echo "Clear the group filter first with: kubebase group --clear" >&2
             return 1
         fi
 
-        if [ "$project_id" != "$KUBEBASE_PROJECT" ]; then
-            echo "ERROR: namespace '$selector' belongs to project '$project_id', not active project '$KUBEBASE_PROJECT'" >&2
+        if [ "$group_id" != "$KUBEBASE_GROUP" ]; then
+            echo "ERROR: namespace '$selector' belongs to group '$group_id', not active group '$KUBEBASE_GROUP'" >&2
             return 1
         fi
     fi
@@ -1126,21 +1137,21 @@ command_emit_namespace()
     set_effective_namespace "$selector"
 
     update_session_navigation \
-        "${KUBEBASE_PROJECT:-}" \
+        "${KUBEBASE_GROUP:-}" \
         "$selector" \
-        "$project_id"
+        "$group_id"
 
     shell_export "KUBEBASE_NAMESPACE" "$selector"
 
-    if [ -n "$project_id" ]; then
-        shell_export "KUBEBASE_NAMESPACE_PROJECT" "$project_id"
+    if [ -n "$group_id" ]; then
+        shell_export "KUBEBASE_NAMESPACE_GROUP" "$group_id"
     else
-        shell_unset "KUBEBASE_NAMESPACE_PROJECT"
+        shell_unset "KUBEBASE_NAMESPACE_GROUP"
     fi
 }
 
 
-command_emit_project()
+command_emit_group()
 {
     local selector="${1:-}"
     local namespace=""
@@ -1154,22 +1165,22 @@ command_emit_project()
             update_session_navigation \
                 "" \
                 "$namespace" \
-                "${KUBEBASE_NAMESPACE_PROJECT:-}"
+                "${KUBEBASE_NAMESPACE_GROUP:-}"
         else
             update_session_navigation "" "" ""
         fi
 
-        shell_unset "KUBEBASE_PROJECT"
+        shell_unset "KUBEBASE_GROUP"
         return 0
     fi
 
     if [ -z "$selector" ]; then
-        selector="$(select_project_interactively)" || return $?
+        selector="$(select_group_interactively)" || return $?
     else
         discover_inventory 0
 
-        inventory_project_exists "$selector" || {
-            echo "ERROR: project '$selector' was not discovered for the active profile" >&2
+        inventory_group_exists "$selector" || {
+            echo "ERROR: group '$selector' was not discovered for the active profile" >&2
             return 1
         }
     fi
@@ -1177,9 +1188,9 @@ command_emit_project()
     clear_effective_namespace
     update_session_navigation "$selector" "" ""
 
-    shell_export "KUBEBASE_PROJECT" "$selector"
+    shell_export "KUBEBASE_GROUP" "$selector"
     shell_unset "KUBEBASE_NAMESPACE"
-    shell_unset "KUBEBASE_NAMESPACE_PROJECT"
+    shell_unset "KUBEBASE_NAMESPACE_GROUP"
 }
 
 
@@ -1194,9 +1205,9 @@ command_direct_namespace()
 }
 
 
-command_direct_project()
+command_direct_group()
 {
-    echo "ERROR: 'project' must modify the active KubeBase shell session and requires Bash integration." >&2
+    echo "ERROR: 'group' must modify the active KubeBase shell session and requires Bash integration." >&2
     echo >&2
     echo "Run:" >&2
     echo >&2
@@ -1216,7 +1227,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 case "$SUBCOMMAND" in
-    namespaces|projects)
+    namespaces|groups|projects)
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --cached)
@@ -1255,7 +1266,7 @@ EOF_USAGE
         if [ "$SUBCOMMAND" = "namespaces" ]; then
             command_namespaces
         else
-            command_projects
+            command_groups
         fi
         ;;
 
@@ -1263,8 +1274,8 @@ EOF_USAGE
         command_direct_namespace
         ;;
 
-    project-direct)
-        command_direct_project
+    group-direct|project-direct)
+        command_direct_group
         ;;
 
     __nav-ns)
@@ -1276,24 +1287,24 @@ EOF_USAGE
         command_emit_namespace "${1:-}"
         ;;
 
-    __nav-project)
+    __nav-group|__nav-project)
         [ "$#" -le 1 ] || {
-            echo "ERROR: usage: kubebase project [PROJECT|--clear]" >&2
+            echo "ERROR: usage: kubebase group [GROUP|--clear]" >&2
             exit 2
         }
 
-        command_emit_project "${1:-}"
+        command_emit_group "${1:-}"
         ;;
 
     help|-h|--help)
         cat <<EOF_USAGE
-$PROJECT_NAME namespace/project navigation
+$PROJECT_NAME namespace/group navigation
 
 Usage:
   kubebase namespaces [--cached]
   kubebase ns [NAME|--clear]
-  kubebase projects [--cached]
-  kubebase project [PROJECT|--clear]
+  kubebase groups [--cached]
+  kubebase group [GROUP|--clear]
 EOF_USAGE
         ;;
 
