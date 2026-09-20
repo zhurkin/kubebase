@@ -2,7 +2,7 @@
 
 KubeBase is a portable workspace and bootstrap system for working with Kubernetes clusters.
 
-It provides a reproducible local environment for Kubernetes CLI tools, cluster profiles, kubeconfigs, users, and namespace environments without mixing local credentials or downloaded artifacts with the Git repository.
+It provides a reproducible local environment for Kubernetes CLI tools, cluster profiles, kubeconfigs, users, and live namespace/group navigation without mixing local credentials or downloaded artifacts with the Git repository.
 
 ## Goals
 
@@ -25,13 +25,13 @@ Example layout:
 
 ```text
 kuber/
-├── kubase/                 # Git repository
+├── kubebase/               # Git repository
 ├── kubebase-config/        # Local cluster configuration
 └── kubebase-workspace/     # Local workspace
     ├── artifacts/
     ├── tools/
     ├── clusters/
-    └── runtime/
+    └── .kubebase/       # sessions and discovery cache
 ```
 
 ## Current workflow
@@ -43,9 +43,10 @@ kuber/
 20  fetch and verify artifacts
 30  install tools
 40  materialize clusters
-50  validate users and kubeconfigs
-60  validate Kubernetes environments
-90  runtime environment (planned)
+50  validate users and kubeconfigs locally
+60  validate profiles against the live Kubernetes API
+70  activate cluster/user profiles
+80  namespace and optional group navigation
 ```
 
 KubeBase currently supports:
@@ -55,10 +56,12 @@ KubeBase currently supports:
 - shared, deduplicated tool artifacts;
 - SHA-256 verification of downloaded artifacts;
 - offline installation from the artifact store;
-- materialized cluster/user/environment workspaces;
+- materialized cluster/user workspaces and per-cluster toolchains;
 - local kubeconfig validation;
 - multiple kubeconfig contexts with explicit context selection;
-- Kubernetes API and namespace/environment validation.
+- live Kubernetes API validation;
+- best-effort namespace discovery with cache fallback;
+- optional namespace grouping derived from namespace metadata when available.
 
 ## Basic usage
 
@@ -94,10 +97,20 @@ Validate users and kubeconfigs locally:
 ./kubebase.sh validate-users
 ```
 
-Validate configured environments against the Kubernetes API:
+Validate configured profiles against the Kubernetes API and refresh the namespace cache:
 
 ```bash
-./kubebase.sh validate-environments
+./kubebase.sh validate-live
+```
+
+Activate a profile and navigate namespaces/groups:
+
+```bash
+eval "$(./kubebase.sh shell-init bash)"
+kubebase use my-cluster/default
+kubebase namespaces
+kubebase groups
+kubebase ns stats-hydra-data
 ```
 
 ## Configuration model
@@ -110,6 +123,8 @@ A kubeconfig may contain multiple Kubernetes contexts and endpoints. KubeBase ca
 2. the kubeconfig `current-context` as a fallback.
 
 The original kubeconfig is never modified when selecting a context.
+
+Namespace groups are optional KubeBase navigation metadata, not a Kubernetes core resource. A cluster may expose no groups at all; in that case namespace discovery and navigation continue to work normally.
 
 ## Security
 
