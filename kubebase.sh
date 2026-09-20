@@ -110,7 +110,7 @@ Commands:
       Activate a profile in the current shell (requires shell-init).
 
   current
-      Show the currently active KubeBase profile and namespace/project navigation.
+      Show the currently active KubeBase profile and namespace/group navigation.
 
   namespaces
       Discover namespaces visible to the active profile (live by default,
@@ -119,11 +119,11 @@ Commands:
   ns [NAME|--clear]
       Select or clear the active Kubernetes namespace (requires shell-init).
 
-  projects
-      List Rancher project IDs discovered from namespace metadata.
+  groups
+      List namespace group IDs discovered from namespace metadata.
 
-  project [PROJECT|--clear]
-      Select or clear the Rancher project navigation filter (requires shell-init).
+  group [GROUP|--clear]
+      Select or clear the namespace group navigation filter (requires shell-init).
 
   off
       Deactivate the current profile (requires shell-init).
@@ -156,17 +156,17 @@ Examples:
 
   eval "\$(./kubebase.sh shell-init bash)"
 
-  kubebase use rancher-main/admin
+  kubebase use my-cluster/default
 
   kubebase current
 
   kubebase namespaces
 
-  kubebase ns stats-hydra-data
+  kubebase ns default
 
-  kubebase projects
+  kubebase groups
 
-  kubebase project p-bmdmw
+  kubebase group GROUP-ID
 
   kubebase off
 EOF_USAGE
@@ -324,24 +324,24 @@ case "$COMMAND" in
         ;;
 
 
-    projects)
+    groups|projects)
 
         shift
 
         exec \
             "$SCRIPTS_DIR/80-navigation.sh" \
-            projects \
+            groups \
             "$@"
         ;;
 
 
-    project)
+    group|project)
 
         shift
 
         exec \
             "$SCRIPTS_DIR/80-navigation.sh" \
-            project-direct \
+            group-direct \
             "$@"
         ;;
 
@@ -401,13 +401,13 @@ case "$COMMAND" in
         ;;
 
 
-    __nav-project)
+    __nav-group|__nav-project)
 
         shift
 
         exec \
             "$SCRIPTS_DIR/80-navigation.sh" \
-            __nav-project \
+            __nav-group \
             "$@"
         ;;
 
