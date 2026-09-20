@@ -15,8 +15,14 @@ set -euo pipefail
 #   2. otherwise use `kubectl auth can-i --list` resourceNames as
 #      candidates and verify each Namespace object individually.
 #
-# Discovery is best effort when namespace LIST is unavailable. A
-# successful inventory refresh is written to the same cache used by
+# Discovery is capability-based. When cluster-wide Namespace LIST is
+# permitted, the resulting inventory is complete for the identity used.
+# Otherwise KubeBase extracts namespace resourceNames from authorization
+# rules and verifies every discovered Namespace object individually. In
+# that fallback mode the discovered entries are verified, but inventory
+# completeness cannot be guaranteed.
+#
+# A successful inventory refresh is written to the same cache used by
 # `kubebase namespaces`.
 # ----------------------------------------------------------------------
 
@@ -59,7 +65,7 @@ REQUEST_TIMEOUT="$DEFAULT_REQUEST_TIMEOUT"
 PROFILES=0
 API_READY=0
 INVENTORY_COMPLETE_COUNT=0
-INVENTORY_BEST_EFFORT_COUNT=0
+INVENTORY_PARTIAL_COUNT=0
 INVENTORY_UNAVAILABLE_COUNT=0
 FAILED=0
 WARNINGS=0
@@ -490,7 +496,14 @@ discover_namespace_inventory()
     )"
     DISCOVERY_METHOD="auth-can-i"
     DISCOVERY_COMPLETE="false"
-    DISCOVERY_NOTE="namespace LIST is unavailable; inventory is best effort"
+    case "$DISCOVERY_LIST_ERROR" in
+        *Forbidden*|*forbidden*)
+            DISCOVERY_NOTE="cluster-wide namespace LIST is forbidden"
+            ;;
+        *)
+            DISCOVERY_NOTE="cluster-wide namespace LIST did not succeed"
+            ;;
+    esac
     return 0
 }
 
@@ -715,18 +728,18 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
             )"
 
             echo "  discovery  : $DISCOVERY_METHOD"
-            echo "  namespaces : $NS_COUNT"
-            echo "  projects   : $PROJECT_COUNT"
-            echo "  cache      : $CACHE_FILE"
+            echo "  namespaces   : $NS_COUNT verified"
+            echo "  projects     : $PROJECT_COUNT"
+            echo "  cache        : $CACHE_FILE"
 
             if [ "$DISCOVERY_COMPLETE" = "true" ]; then
                 INVENTORY_COMPLETE_COUNT=$((INVENTORY_COMPLETE_COUNT + 1))
-                echo "  inventory  : complete"
+                echo "  completeness : complete"
             else
-                INVENTORY_BEST_EFFORT_COUNT=$((INVENTORY_BEST_EFFORT_COUNT + 1))
-                echo "  inventory  : best effort"
+                INVENTORY_PARTIAL_COUNT=$((INVENTORY_PARTIAL_COUNT + 1))
+                echo "  completeness : not guaranteed"
                 if [ -n "$DISCOVERY_NOTE" ]; then
-                    echo "  note       : $DISCOVERY_NOTE"
+                    echo "  note         : $DISCOVERY_NOTE"
                 fi
             fi
 
@@ -737,9 +750,9 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                 INVENTORY_UNAVAILABLE_COUNT=$((INVENTORY_UNAVAILABLE_COUNT + 1))
                 record_warning "profile '$CLUSTER_NAME/$USER_NAME': namespace discovery unavailable: $DISCOVERY_ERROR"
                 echo "  api        : OK (authenticated; namespace inventory unavailable)"
-                echo "  discovery  : unavailable"
-                echo "  inventory  : unavailable"
-                echo "  status     : PARTIAL"
+                echo "  discovery    : unavailable"
+                echo "  completeness : unavailable"
+                echo "  status       : PARTIAL"
             else
                 record_error "profile '$CLUSTER_NAME/$USER_NAME': Kubernetes API/authentication failed: $DISCOVERY_ERROR"
                 FAILED=$((FAILED + 1))
@@ -762,9 +775,9 @@ echo
 echo "Summary:"
 echo "  profiles              : $PROFILES"
 echo "  API ready             : $API_READY"
-echo "  inventory complete    : $INVENTORY_COMPLETE_COUNT"
-echo "  inventory best effort : $INVENTORY_BEST_EFFORT_COUNT"
-echo "  inventory unavailable : $INVENTORY_UNAVAILABLE_COUNT"
+echo "  complete inventories    : $INVENTORY_COMPLETE_COUNT"
+echo "  partial inventories     : $INVENTORY_PARTIAL_COUNT"
+echo "  inventory unavailable   : $INVENTORY_UNAVAILABLE_COUNT"
 echo "  failed                : $FAILED"
 echo "  warnings              : $WARNINGS"
 echo "  errors                : $ERRORS"
