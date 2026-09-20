@@ -1054,7 +1054,7 @@ fi
 # ----------------------------------------------------------------------
 
 PLAN_FILE="$(
-    mktemp "$RUNTIME_DIR/fetch-plan.XXXXXX"
+    mktemp
 )"
 
 
@@ -1368,8 +1368,7 @@ do
 
 
     ACTIVE_AUTH_FILE="$(
-        mktemp \
-            "$RUNTIME_DIR/curl-auth.XXXXXX"
+        mktemp
     )"
 
 
