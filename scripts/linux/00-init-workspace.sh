@@ -66,7 +66,7 @@ usage()
 $PROJECT_NAME workspace initialization
 
 Usage:
-  $(basename "$0") [options]
+  kubebase init [options]
 
 Options:
   --workspace-config PATH
@@ -92,15 +92,15 @@ Options:
       Show this help.
 
 Examples:
-  $(basename "$0")
+  kubebase init
 
-  $(basename "$0") \\
+  kubebase init \\
       --workspace-name my-workspace
 
-  $(basename "$0") \\
+  kubebase init \\
       --workspace-config /etc/kubebase/workspace.json
 
-  $(basename "$0") \\
+  kubebase init \\
       --workspace-root /srv/kubernetes
 EOF
 }

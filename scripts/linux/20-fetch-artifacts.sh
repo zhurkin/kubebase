@@ -24,7 +24,7 @@ CLUSTER_SCHEMA="kubebase.cluster"
 TOOL_SOURCES_SCHEMA="kubebase.toolSources"
 
 ARTIFACT_SCHEMA="kubebase.artifact"
-ARTIFACT_SCHEMA_VERSION=1
+ARTIFACT_SCHEMA_VERSION=2
 
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 
@@ -123,7 +123,7 @@ usage()
 $PROJECT_NAME artifact fetch
 
 Usage:
-  $(basename "$0") [options]
+  kubebase fetch [options]
 
 Options:
   --workspace-name NAME
@@ -155,13 +155,13 @@ Options:
       Show this help.
 
 Examples:
-  $(basename "$0") --dry-run
+  kubebase fetch --dry-run
 
-  $(basename "$0")
+  kubebase fetch
 
-  $(basename "$0") --platform windows-amd64
+  kubebase fetch --platform windows-amd64
 
-  $(basename "$0") \
+  kubebase fetch \
       --tool-sources /etc/kubebase/sources.json
 EOF_USAGE
 }
@@ -588,8 +588,10 @@ verify_existing_artifact()
     local checksum_type
 
     local expected
+    local checksum_sha256
     local checksum_expected
     local actual
+    local checksum_actual
 
 
     [ -f "$manifest" ] || return 1
@@ -625,6 +627,8 @@ verify_existing_artifact()
         (.checksum.file | type) == "string"
         and
         (.checksum.type | type) == "string"
+        and
+        (.checksum.sha256 | type) == "string"
 
     ' "$manifest" >/dev/null 2>&1
     then
@@ -650,6 +654,14 @@ verify_existing_artifact()
         ' "$manifest"
     )"
 
+    checksum_sha256="$(
+        jq -r '
+            .checksum.sha256
+        ' "$manifest"
+    )"
+
+    checksum_sha256="${checksum_sha256,,}"
+
     expected="$(
         jq -r '
             .artifact.sha256
@@ -665,6 +677,17 @@ verify_existing_artifact()
 
     [ -f "$dir/$artifact_file" ] || return 1
     [ -f "$dir/$checksum_file" ] || return 1
+
+
+    checksum_actual="$(
+        sha256sum "$dir/$checksum_file" |
+        awk '{print $1}'
+    )"
+
+    checksum_actual="${checksum_actual,,}"
+
+
+    [ "$checksum_actual" = "$checksum_sha256" ] || return 1
 
 
     actual="$(
@@ -1394,6 +1417,14 @@ do
     ACTUAL_SHA256="${ACTUAL_SHA256,,}"
 
 
+    CHECKSUM_SHA256="$(
+        sha256sum "$STAGED_CHECKSUM" |
+        awk '{print $1}'
+    )"
+
+    CHECKSUM_SHA256="${CHECKSUM_SHA256,,}"
+
+
     if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
         kb_fail "SHA-256 mismatch for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
     fi
@@ -1424,7 +1455,8 @@ do
         --arg artifactSha256 "$ACTUAL_SHA256" \
         --arg checksumFile "$CHECKSUM_FILENAME" \
         --arg checksumUrl "$CHECKSUM_URL" \
-        --arg checksumType "$CHECKSUM_TYPE" '
+        --arg checksumType "$CHECKSUM_TYPE" \
+        --arg checksumSha256 "$CHECKSUM_SHA256" '
 
         {
             schema: $schema,
@@ -1445,7 +1477,8 @@ do
             checksum: {
                 file: $checksumFile,
                 url: $checksumUrl,
-                type: $checksumType
+                type: $checksumType,
+                sha256: $checksumSha256
             }
         }
 

@@ -25,6 +25,12 @@ CLUSTER_SCHEMA_VERSION=1
 TOOLCHAIN_SCHEMA="kubebase.clusterToolchain"
 TOOLCHAIN_SCHEMA_VERSION=1
 
+INSTALL_SCHEMA="kubebase.toolInstall"
+INSTALL_SCHEMA_VERSION=1
+
+ARTIFACT_SCHEMA="kubebase.artifact"
+ARTIFACT_SCHEMA_VERSION=2
+
 SESSION_SCHEMA="kubebase.session"
 SESSION_SCHEMA_VERSION=1
 
@@ -45,6 +51,8 @@ source "$LIB_DIR/common.sh"
 source "$LIB_DIR/toolchain.sh"
 source "$LIB_DIR/workspace.sh"
 source "$LIB_DIR/profile.sh"
+source "$LIB_DIR/artifact-binary.sh"
+source "$LIB_DIR/active-session.sh"
 
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
@@ -70,6 +78,7 @@ WORKSPACE_FILE=""
 CONFIG_DIR=""
 CLUSTERS_DIR=""
 TOOLS_DIR=""
+ARTIFACTS_DIR=""
 INTERNAL_DIR=""
 SESSIONS_DIR=""
 HOST_PLATFORM=""
@@ -103,7 +112,7 @@ usage()
 $PROJECT_NAME profile management
 
 Usage:
-  $(basename "$0") profiles [options]
+  kubebase profiles [options]
   kubebase shell init bash [options]
   kubebase current [--verbose]
 
@@ -222,6 +231,7 @@ load_workspace()
     WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
     CLUSTERS_DIR="$WORKSPACE_DIR/clusters"
     TOOLS_DIR="$WORKSPACE_DIR/tools"
+    ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
     INTERNAL_DIR="$WORKSPACE_DIR/.kubebase"
     SESSIONS_DIR="$INTERNAL_DIR/sessions"
 
@@ -234,6 +244,9 @@ load_workspace()
 
     [ -d "$TOOLS_DIR" ] || \
         kb_fail "tools directory not found: $TOOLS_DIR"
+
+    [ -d "$ARTIFACTS_DIR" ] || \
+        kb_fail "artifact directory not found: $ARTIFACTS_DIR"
 
     "$CONFIG_VALIDATOR" \
         --workspace-name "$WORKSPACE_NAME" \
@@ -270,6 +283,154 @@ load_workspace()
 
 }
 
+
+# ----------------------------------------------------------------------
+# Installed tool source binding
+# ----------------------------------------------------------------------
+
+verify_installed_profile_tool()
+{
+    local requested_tool="$1"
+    local requested_version="$2"
+    local requested_platform="$3"
+
+    local install_dir="$TOOLS_DIR/$requested_platform/$requested_tool/$requested_version"
+    local install_manifest="$install_dir/manifest.json"
+    local artifact_dir="$ARTIFACTS_DIR/$requested_platform/$requested_tool/$requested_version"
+    local artifact_manifest="$artifact_dir/manifest.json"
+
+    local recorded_artifact_file
+    local recorded_artifact_sha256
+    local recorded_source_binary
+    local binary_file
+    local binary_sha256
+    local artifact_file
+    local artifact_type
+    local artifact_binary
+    local artifact_sha256
+    local checksum_file
+    local checksum_sha256
+    local actual_sha256
+    local source_binary_sha256
+    local expected_binary_file
+
+    VERIFIED_PROFILE_BINARY_FILE=""
+    VERIFIED_PROFILE_BINARY_SHA256=""
+
+    [ -f "$install_manifest" ] || return 1
+    [ -r "$install_manifest" ] || return 1
+    [ -f "$artifact_manifest" ] || return 1
+    [ -r "$artifact_manifest" ] || return 1
+
+    jq -e \
+        --arg schema "$INSTALL_SCHEMA" \
+        --argjson schemaVersion "$INSTALL_SCHEMA_VERSION" \
+        --arg tool "$requested_tool" \
+        --arg version "$requested_version" \
+        --arg platform "$requested_platform" '
+        .schema == $schema
+        and .schemaVersion == $schemaVersion
+        and .tool == $tool
+        and .version == $version
+        and .platform == $platform
+        and (.artifact.file | type) == "string"
+        and (.artifact.sha256 | type) == "string"
+        and (.binary.sourcePath | type) == "string"
+        and (.binary.file | type) == "string"
+        and (.binary.sha256 | type) == "string"
+    ' "$install_manifest" >/dev/null 2>&1 || return 1
+
+    jq -e \
+        --arg schema "$ARTIFACT_SCHEMA" \
+        --argjson schemaVersion "$ARTIFACT_SCHEMA_VERSION" \
+        --arg tool "$requested_tool" \
+        --arg version "$requested_version" \
+        --arg platform "$requested_platform" '
+        .schema == $schema
+        and .schemaVersion == $schemaVersion
+        and .tool == $tool
+        and .version == $version
+        and .platform == $platform
+        and (.artifact.file | type) == "string"
+        and (.artifact.type | type) == "string"
+        and (.artifact.binary | type) == "string"
+        and (.artifact.sha256 | type) == "string"
+        and (.checksum.file | type) == "string"
+        and (.checksum.sha256 | type) == "string"
+    ' "$artifact_manifest" >/dev/null 2>&1 || return 1
+
+    recorded_artifact_file="$(jq -r '.artifact.file' "$install_manifest")"
+    recorded_artifact_sha256="$(jq -r '.artifact.sha256' "$install_manifest")"
+    recorded_source_binary="$(jq -r '.binary.sourcePath' "$install_manifest")"
+    binary_file="$(jq -r '.binary.file' "$install_manifest")"
+    binary_sha256="$(jq -r '.binary.sha256' "$install_manifest")"
+
+    artifact_file="$(jq -r '.artifact.file' "$artifact_manifest")"
+    artifact_type="$(jq -r '.artifact.type' "$artifact_manifest")"
+    artifact_binary="$(jq -r '.artifact.binary' "$artifact_manifest")"
+    artifact_sha256="$(jq -r '.artifact.sha256' "$artifact_manifest")"
+    checksum_file="$(jq -r '.checksum.file' "$artifact_manifest")"
+    checksum_sha256="$(jq -r '.checksum.sha256' "$artifact_manifest")"
+
+    recorded_artifact_sha256="${recorded_artifact_sha256,,}"
+    binary_sha256="${binary_sha256,,}"
+    artifact_sha256="${artifact_sha256,,}"
+    checksum_sha256="${checksum_sha256,,}"
+
+    kb_safe_filename "$recorded_artifact_file" || return 1
+    kb_safe_filename "$binary_file" || return 1
+    kb_safe_filename "$artifact_file" || return 1
+    kb_safe_relative_path "$recorded_source_binary" || return 1
+    kb_safe_relative_path "$artifact_binary" || return 1
+    kb_safe_filename "$checksum_file" || return 1
+
+    [[ "$recorded_artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$binary_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$checksum_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    expected_binary_file="$requested_tool"
+    case "$requested_platform" in
+        windows-*) expected_binary_file="${expected_binary_file}.exe" ;;
+    esac
+
+    [ "$binary_file" = "$expected_binary_file" ] || return 1
+    [ "$recorded_artifact_file" = "$artifact_file" ] || return 1
+    [ "$recorded_artifact_sha256" = "$artifact_sha256" ] || return 1
+    [ "$recorded_source_binary" = "$artifact_binary" ] || return 1
+
+    [ -f "$artifact_dir/$artifact_file" ] || return 1
+    [ -f "$artifact_dir/$checksum_file" ] || return 1
+
+    actual_sha256="$(sha256sum "$artifact_dir/$artifact_file" | awk '{print $1}')"
+    actual_sha256="${actual_sha256,,}"
+    [ "$actual_sha256" = "$artifact_sha256" ] || return 1
+
+    actual_sha256="$(sha256sum "$artifact_dir/$checksum_file" | awk '{print $1}')"
+    actual_sha256="${actual_sha256,,}"
+    [ "$actual_sha256" = "$checksum_sha256" ] || return 1
+
+    if ! source_binary_sha256="$(
+        kb_artifact_binary_sha256 \
+            "$artifact_dir/$artifact_file" \
+            "$artifact_type" \
+            "$artifact_binary"
+    )"; then
+        return 1
+    fi
+
+    [ "$source_binary_sha256" = "$binary_sha256" ] || return 1
+    [ -f "$install_dir/$binary_file" ] || return 1
+    [ -x "$install_dir/$binary_file" ] || return 1
+
+    actual_sha256="$(sha256sum "$install_dir/$binary_file" | awk '{print $1}')"
+    actual_sha256="${actual_sha256,,}"
+    [ "$actual_sha256" = "$source_binary_sha256" ] || return 1
+
+    VERIFIED_PROFILE_BINARY_FILE="$binary_file"
+    VERIFIED_PROFILE_BINARY_SHA256="$source_binary_sha256"
+    return 0
+}
 
 # ----------------------------------------------------------------------
 # Profile resolution / validation
@@ -320,6 +481,8 @@ resolve_profile()
     local actual_sha256
     local command_count
     local tool_count
+    local verified_binary_file
+    local verified_binary_sha256
 
     reset_profile_state
 
@@ -425,22 +588,35 @@ resolve_profile()
     while IFS=$'\t' read -r tool_name tool_version; do
         [ -n "$tool_name" ] || continue
 
+        if ! verify_installed_profile_tool \
+            "$tool_name" \
+            "$tool_version" \
+            "$HOST_PLATFORM"
+        then
+            set_profile_error "cluster '$cluster_name' installed tool failed source verification: $tool_name $tool_version $HOST_PLATFORM"
+            return 1
+        fi
+
+        verified_binary_file="$VERIFIED_PROFILE_BINARY_FILE"
+        verified_binary_sha256="$VERIFIED_PROFILE_BINARY_SHA256"
+
         command_name="$(kb_tool_command_name "$tool_name")"
         command_path="$PROFILE_TOOLCHAIN_BIN/$command_name"
+        expected_target="../../../../../tools/$HOST_PLATFORM/$tool_name/$tool_version/$verified_binary_file"
 
         if ! jq -e \
             --arg command "$command_name" \
             --arg tool "$tool_name" \
-            --arg version "$tool_version" '
+            --arg version "$tool_version" \
+            --arg binary "$verified_binary_file" \
+            --arg sha256 "$verified_binary_sha256" \
+            --arg linkTarget "$expected_target" '
             (.commands[$command] | type) == "object"
-            and
-            .commands[$command].tool == $tool
-            and
-            .commands[$command].version == $version
-            and
-            (.commands[$command].sha256 | type) == "string"
-            and
-            (.commands[$command].linkTarget | type) == "string"
+            and .commands[$command].tool == $tool
+            and .commands[$command].version == $version
+            and .commands[$command].binary == $binary
+            and ((.commands[$command].sha256 | ascii_downcase) == $sha256)
+            and .commands[$command].linkTarget == $linkTarget
         ' "$PROFILE_TOOLCHAIN_MANIFEST" >/dev/null 2>&1
         then
             set_profile_error "cluster '$cluster_name' toolchain entry '$command_name' does not match configuration"
@@ -457,13 +633,6 @@ resolve_profile()
             return 1
         }
 
-        expected_target="$(
-            jq -r \
-                --arg command "$command_name" '
-                .commands[$command].linkTarget
-            ' "$PROFILE_TOOLCHAIN_MANIFEST"
-        )"
-
         actual_target="$(readlink -- "$command_path")"
 
         if [ "$actual_target" != "$expected_target" ]; then
@@ -471,19 +640,7 @@ resolve_profile()
             return 1
         fi
 
-        expected_sha256="$(
-            jq -r \
-                --arg command "$command_name" '
-                .commands[$command].sha256
-            ' "$PROFILE_TOOLCHAIN_MANIFEST"
-        )"
-
-        expected_sha256="${expected_sha256,,}"
-
-        [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-            set_profile_error "cluster '$cluster_name' toolchain has invalid SHA-256 metadata: $command_name"
-            return 1
-        }
+        expected_sha256="$verified_binary_sha256"
 
         actual_sha256="$(
             sha256sum "$command_path" |
@@ -1120,11 +1277,16 @@ command_current()
         return 1
     fi
 
-    if [ -x "${KUBEBASE_TOOLCHAIN_BIN:-}/kubectl" ] && \
+    if ! kb_verify_active_session_kubectl; then
+        echo "ERROR: active KubeBase session failed integrity verification: $KB_ACTIVE_SESSION_ERROR" >&2
+        return 1
+    fi
+
+    if [ -x "$KB_ACTIVE_KUBECTL_BIN" ] && \
        [ -f "${KUBEBASE_EFFECTIVE_KUBECONFIG:-}" ]; then
 
         namespace="$(
-            "${KUBEBASE_TOOLCHAIN_BIN}/kubectl" \
+            "$KB_ACTIVE_KUBECTL_BIN" \
                 --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
                 config view \
                 -o json 2>/dev/null |
@@ -1217,7 +1379,7 @@ command_shell_init()
     local shell_name="$1"
 
     [ "$shell_name" = "bash" ] || \
-        kb_fail "unsupported shell '$shell_name'; Step 70 currently supports bash only"
+        kb_fail "unsupported shell '$shell_name'; KubeBase Linux integration currently supports bash only"
 
     load_workspace
 
@@ -1239,6 +1401,11 @@ kubebase()
     case "$__kb_command" in
         use)
             shift || true
+
+            if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+                echo "Usage: kubebase use [CLUSTER/USER]"
+                return 0
+            fi
 
             if [ "$#" -eq 0 ]; then
                 __kb_selector="$(
@@ -1327,6 +1494,11 @@ kubebase()
         ns)
             shift || true
 
+            if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+                echo "Usage: kubebase ns [NAME|--clear]"
+                return 0
+            fi
+
             if [ "$#" -gt 1 ]; then
                 echo "ERROR: usage: kubebase ns [NAME|--clear]" >&2
                 return 2
@@ -1353,6 +1525,11 @@ kubebase()
 
         group)
             shift || true
+
+            if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+                echo "Usage: kubebase group [GROUP|--clear]"
+                return 0
+            fi
 
             if [ "$#" -gt 1 ]; then
                 echo "ERROR: usage: kubebase group [GROUP|--clear]" >&2
@@ -1402,6 +1579,11 @@ kubebase()
 
         off)
             shift || true
+
+            if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+                echo "Usage: kubebase off"
+                return 0
+            fi
 
             if [ "$#" -ne 0 ]; then
                 echo "ERROR: usage: kubebase off" >&2
@@ -1534,13 +1716,19 @@ case "$SUBCOMMAND" in
         ;;
 
     shell-init)
-        parse_common_args "$@" || exit $?
+        for arg in "$@"; do
+            case "$arg" in
+                -h|--help)
+                    cat <<EOF_USAGE
+Usage:
+  kubebase shell init bash [--workspace-name NAME] [--workspace-root PATH]
+EOF_USAGE
+                    exit 0
+                    ;;
+            esac
+        done
 
-        if [ "${#POSITIONAL_ARGS[@]}" -eq 1 ] && \
-           [ "${POSITIONAL_ARGS[0]}" = "--help" ]; then
-            usage
-            exit 0
-        fi
+        parse_common_args "$@" || exit $?
 
         if [ "${#POSITIONAL_ARGS[@]}" -ne 1 ]; then
             echo "ERROR: usage: kubebase shell init bash [options]" >&2

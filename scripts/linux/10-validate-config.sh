@@ -80,7 +80,7 @@ usage()
 $PROJECT_NAME configuration validation
 
 Usage:
-  $(basename "$0") [options]
+  kubebase validate config [options]
 
 Options:
   --workspace-name NAME
@@ -103,14 +103,14 @@ Options:
       Show this help.
 
 Examples:
-  $(basename "$0")
+  kubebase validate config
 
-  $(basename "$0") --quiet
+  kubebase validate config --quiet
 
-  $(basename "$0") \\
+  kubebase validate config \\
       --workspace-name my-workspace
 
-  $(basename "$0") \\
+  kubebase validate config \\
       --workspace-root /srv/kubernetes
 EOF
 }
@@ -169,6 +169,21 @@ validate_cluster_structure()
             nonempty_string
             and test("^[A-Za-z0-9][A-Za-z0-9._-]*$");
 
+        def safe_version:
+            nonempty_string
+            and test("^[A-Za-z0-9][A-Za-z0-9._+~-]*$")
+            and . != "."
+            and . != "..";
+
+        def safe_relative_path:
+            nonempty_string
+            and (startswith("/") | not)
+            and (test("[\n\r\t]") | not)
+            and (
+                split("/")
+                | all(.[]; length > 0 and . != "." and . != "..")
+            );
+
         .schema == $schema
         and
         .schemaVersion == $version
@@ -185,7 +200,7 @@ validate_cluster_structure()
 
         (.toolPlatforms | type) == "array"
         and
-        all(.toolPlatforms[]; nonempty_string)
+        all(.toolPlatforms[]; safe_name)
         and
         (
             (.toolPlatforms | length)
@@ -206,7 +221,7 @@ validate_cluster_structure()
             and
             (((.value | keys) - ["version"]) | length == 0)
             and
-            (.value.version | nonempty_string)
+            (.value.version | safe_version)
         )
 
         and
@@ -222,7 +237,7 @@ validate_cluster_structure()
             and
             (((.value | keys) - ["context", "kubeconfig"]) | length == 0)
             and
-            (.value.kubeconfig | nonempty_string)
+            (.value.kubeconfig | safe_relative_path)
 
             and
 

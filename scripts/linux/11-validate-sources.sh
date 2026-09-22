@@ -115,7 +115,7 @@ usage()
 $PROJECT_NAME tool source validation
 
 Usage:
-  $(basename "$0") [options]
+  kubebase validate sources [options]
 
 Options:
   --workspace-name NAME
@@ -152,13 +152,13 @@ Options:
       Show this help.
 
 Examples:
-  $(basename "$0") --offline
+  kubebase validate sources --offline
 
-  $(basename "$0")
+  kubebase validate sources
 
-  $(basename "$0") --platform windows-amd64 --offline
+  kubebase validate sources --platform windows-amd64 --offline
 
-  $(basename "$0") \\
+  kubebase validate sources \\
       --tool-sources /etc/kubebase/sources.json \\
       --offline
 EOF
@@ -1617,7 +1617,7 @@ echo
 echo "NOTE:"
 echo "  Probe URL reachability was checked."
 echo "  Exact artifact and checksum URLs are not downloaded here."
-echo "  Exact version availability will be verified by Step 20."
+echo "  Exact version availability will be verified by kubebase fetch."
 
 echo
 echo "Validation OK"

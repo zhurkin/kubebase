@@ -31,6 +31,12 @@ PROJECT_NAME="KubeBase"
 CLUSTER_SCHEMA="kubebase.cluster"
 CLUSTER_SCHEMA_VERSION=1
 
+TOOLCHAIN_SCHEMA="kubebase.clusterToolchain"
+TOOLCHAIN_SCHEMA_VERSION=1
+
+INSTALL_SCHEMA="kubebase.toolInstall"
+INSTALL_SCHEMA_VERSION=1
+
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 DEFAULT_REQUEST_TIMEOUT="10s"
 
@@ -111,7 +117,7 @@ usage()
 $PROJECT_NAME live profile validation
 
 Usage:
-  $(basename "$0") [options]
+  kubebase validate live [options]
 
 Options:
   --workspace-name NAME
@@ -176,6 +182,138 @@ write_inventory_cache()
 }
 
 
+verify_materialized_kubectl()
+{
+    local cluster_name="$1"
+    local cluster_file="$2"
+    local cluster_dir="$3"
+    local platform="$4"
+
+    local kubectl_version
+    local install_dir
+    local install_manifest
+    local installed_binary_file
+    local installed_binary_sha256
+    local installed_binary_path
+    local actual_installed_sha256
+
+    local toolchain_dir
+    local toolchain_manifest
+    local command_path
+    local expected_target
+    local actual_target
+    local manifest_sha256
+    local actual_command_sha256
+
+    kubectl_version="$(jq -r '.tools.kubectl.version // empty' "$cluster_file")"
+    [ -n "$kubectl_version" ] || return 1
+
+    install_dir="$WORKSPACE_DIR/tools/$platform/kubectl/$kubectl_version"
+    install_manifest="$install_dir/manifest.json"
+
+    [ -f "$install_manifest" ] || return 1
+    [ -r "$install_manifest" ] || return 1
+
+    if ! jq -e \
+        --arg schema "$INSTALL_SCHEMA" \
+        --argjson schemaVersion "$INSTALL_SCHEMA_VERSION" \
+        --arg version "$kubectl_version" \
+        --arg platform "$platform" '
+        .schema == $schema
+        and
+        .schemaVersion == $schemaVersion
+        and
+        .tool == "kubectl"
+        and
+        .version == $version
+        and
+        .platform == $platform
+        and
+        (.binary.file | type) == "string"
+        and
+        (.binary.sha256 | type) == "string"
+    ' "$install_manifest" >/dev/null 2>&1
+    then
+        return 1
+    fi
+
+    installed_binary_file="$(jq -r '.binary.file' "$install_manifest")"
+    installed_binary_sha256="$(jq -r '.binary.sha256' "$install_manifest")"
+    installed_binary_sha256="${installed_binary_sha256,,}"
+
+    kb_safe_filename "$installed_binary_file" || return 1
+    [[ "$installed_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    installed_binary_path="$install_dir/$installed_binary_file"
+    [ -f "$installed_binary_path" ] || return 1
+    [ -x "$installed_binary_path" ] || return 1
+
+    actual_installed_sha256="$(sha256sum "$installed_binary_path" | awk '{print $1}')"
+    actual_installed_sha256="${actual_installed_sha256,,}"
+    [ "$actual_installed_sha256" = "$installed_binary_sha256" ] || return 1
+
+    toolchain_dir="$cluster_dir/toolchains/$platform"
+    toolchain_manifest="$toolchain_dir/manifest.json"
+    command_path="$toolchain_dir/bin/kubectl"
+    expected_target="../../../../../tools/$platform/kubectl/$kubectl_version/$installed_binary_file"
+
+    [ -f "$toolchain_manifest" ] || return 1
+    [ -r "$toolchain_manifest" ] || return 1
+
+    if ! jq -e \
+        --arg schema "$TOOLCHAIN_SCHEMA" \
+        --argjson schemaVersion "$TOOLCHAIN_SCHEMA_VERSION" \
+        --arg cluster "$cluster_name" \
+        --arg platform "$platform" \
+        --arg version "$kubectl_version" \
+        --arg binary "$installed_binary_file" \
+        --arg sha256 "$installed_binary_sha256" \
+        --arg linkTarget "$expected_target" '
+        .schema == $schema
+        and
+        .schemaVersion == $schemaVersion
+        and
+        .cluster == $cluster
+        and
+        .platform == $platform
+        and
+        (.commands.kubectl | type) == "object"
+        and
+        .commands.kubectl.tool == "kubectl"
+        and
+        .commands.kubectl.version == $version
+        and
+        .commands.kubectl.binary == $binary
+        and
+        ((.commands.kubectl.sha256 | ascii_downcase) == $sha256)
+        and
+        .commands.kubectl.linkTarget == $linkTarget
+    ' "$toolchain_manifest" >/dev/null 2>&1
+    then
+        return 1
+    fi
+
+    [ -L "$command_path" ] || return 1
+    [ -x "$command_path" ] || return 1
+
+    actual_target="$(readlink -- "$command_path")"
+    [ "$actual_target" = "$expected_target" ] || return 1
+
+    manifest_sha256="$(jq -r '.commands.kubectl.sha256' "$toolchain_manifest")"
+    manifest_sha256="${manifest_sha256,,}"
+    [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    actual_command_sha256="$(sha256sum "$command_path" | awk '{print $1}')"
+    actual_command_sha256="${actual_command_sha256,,}"
+
+    [ "$actual_command_sha256" = "$manifest_sha256" ] || return 1
+    [ "$actual_command_sha256" = "$installed_binary_sha256" ] || return 1
+
+    VERIFIED_LIVE_KUBECTL="$command_path"
+    return 0
+}
+
+
 # ----------------------------------------------------------------------
 # Arguments
 # ----------------------------------------------------------------------
@@ -183,17 +321,17 @@ write_inventory_cache()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --workspace-name)
-            [ "$#" -ge 2 ] || kb_fail "--workspace-name requires a value"
+            [ "$#" -ge 2 ] || { echo "ERROR: --workspace-name requires a value" >&2; exit 2; }
             WORKSPACE_NAME="$2"
             shift 2
             ;;
         --workspace-root)
-            [ "$#" -ge 2 ] || kb_fail "--workspace-root requires a value"
+            [ "$#" -ge 2 ] || { echo "ERROR: --workspace-root requires a value" >&2; exit 2; }
             WORKSPACE_ROOT="$2"
             shift 2
             ;;
         --request-timeout)
-            [ "$#" -ge 2 ] || kb_fail "--request-timeout requires a value"
+            [ "$#" -ge 2 ] || { echo "ERROR: --request-timeout requires a value" >&2; exit 2; }
             REQUEST_TIMEOUT="$2"
             shift 2
             ;;
@@ -289,12 +427,18 @@ echo "Network    : enabled (read-only)"
 for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
     CLUSTER_NAME="$(jq -r '.name' "$CLUSTER_FILE")"
     CLUSTER_DIR="$CLUSTERS_DIR/$CLUSTER_NAME"
-    KUBECTL_BIN="$CLUSTER_DIR/toolchains/$HOST_PLATFORM/bin/kubectl"
 
-    if [ ! -x "$KUBECTL_BIN" ]; then
-        record_error "cluster '$CLUSTER_NAME': materialized kubectl is missing: $KUBECTL_BIN"
+    if ! verify_materialized_kubectl \
+        "$CLUSTER_NAME" \
+        "$CLUSTER_FILE" \
+        "$CLUSTER_DIR" \
+        "$HOST_PLATFORM"
+    then
+        record_error "cluster '$CLUSTER_NAME': materialized kubectl failed integrity verification; run: kubebase materialize"
         continue
     fi
+
+    KUBECTL_BIN="$VERIFIED_LIVE_KUBECTL"
 
     mapfile -t USER_NAMES < <(jq -r '.users | keys[]' "$CLUSTER_FILE")
 

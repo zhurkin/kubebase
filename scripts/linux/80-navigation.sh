@@ -15,6 +15,7 @@ SCRIPT_DIR="$(
 LIB_DIR="$SCRIPT_DIR/lib"
 source "$LIB_DIR/common.sh"
 source "$LIB_DIR/namespace-inventory.sh"
+source "$LIB_DIR/active-session.sh"
 
 
 # ----------------------------------------------------------------------
@@ -75,66 +76,11 @@ LAST_COMPLETE_COUNT=0
 
 require_active_profile()
 {
-    [ "${KUBEBASE_ACTIVE:-}" = "1" ] || \
-        kb_fail "no active KubeBase profile; run 'kubebase use' first"
+    if ! kb_verify_active_session_kubectl; then
+        kb_fail "$KB_ACTIVE_SESSION_ERROR"
+    fi
 
-    [ -n "${KUBEBASE_WORKSPACE:-}" ] || \
-        kb_fail "active profile has no workspace"
-
-    [ -n "${KUBEBASE_CLUSTER:-}" ] || \
-        kb_fail "active profile has no cluster"
-
-    [ -n "${KUBEBASE_USER:-}" ] || \
-        kb_fail "active profile has no user"
-
-    [ -n "${KUBEBASE_CONTEXT:-}" ] || \
-        kb_fail "active profile has no context"
-
-    [ -n "${KUBEBASE_TOOLCHAIN_BIN:-}" ] || \
-        kb_fail "active profile has no toolchain"
-
-    [ -n "${KUBEBASE_EFFECTIVE_KUBECONFIG:-}" ] || \
-        kb_fail "active profile has no effective kubeconfig"
-
-    [ -n "${KUBEBASE_SESSION_DIR:-}" ] || \
-        kb_fail "active profile has no session directory"
-
-    KUBECTL_BIN="$KUBEBASE_TOOLCHAIN_BIN/kubectl"
-
-    [ -x "$KUBECTL_BIN" ] || \
-        kb_fail "active profile kubectl is missing or not executable: $KUBECTL_BIN"
-
-    kb_require_readable_file \
-        "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
-        "effective kubeconfig"
-
-    [ -d "$KUBEBASE_SESSION_DIR" ] || \
-        kb_fail "active KubeBase session not found: $KUBEBASE_SESSION_DIR"
-
-    kb_require_readable_json_file \
-        "$KUBEBASE_SESSION_DIR/session.json" \
-        "active KubeBase session metadata"
-
-    jq -e \
-        --arg schema "$SESSION_SCHEMA" \
-        --argjson version "$SESSION_SCHEMA_VERSION" \
-        --arg workspace "$KUBEBASE_WORKSPACE" \
-        --arg cluster "$KUBEBASE_CLUSTER" \
-        --arg user "$KUBEBASE_USER" \
-        --arg context "$KUBEBASE_CONTEXT" '
-        .schema == $schema
-        and
-        .schemaVersion == $version
-        and
-        .workspace == $workspace
-        and
-        .profile.cluster == $cluster
-        and
-        .profile.user == $user
-        and
-        .profile.context == $context
-    ' "$KUBEBASE_SESSION_DIR/session.json" >/dev/null 2>&1 || \
-        kb_fail "active KubeBase session metadata does not match the shell profile"
+    KUBECTL_BIN="$KB_ACTIVE_KUBECTL_BIN"
 
     CACHE_DIR="$(
         kb_namespace_cache_v3_dir \
@@ -144,7 +90,6 @@ require_active_profile()
             "$KUBEBASE_CONTEXT"
     )"
 }
-
 
 load_last_complete_metadata()
 {
@@ -1191,7 +1136,7 @@ EOF_USAGE
         ;;
 
     *)
-        echo "ERROR: unknown Step 80 command: $SUBCOMMAND" >&2
+        echo "ERROR: unknown navigation command: $SUBCOMMAND" >&2
         exit 2
         ;;
 esac

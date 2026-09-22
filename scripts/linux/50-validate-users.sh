@@ -28,6 +28,9 @@ CLUSTER_SCHEMA="kubebase.cluster"
 INSTALL_SCHEMA="kubebase.toolInstall"
 INSTALL_SCHEMA_VERSION=1
 
+ARTIFACT_SCHEMA="kubebase.artifact"
+ARTIFACT_SCHEMA_VERSION=2
+
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 
 
@@ -44,6 +47,7 @@ LIB_DIR="$SCRIPT_DIR/lib"
 source "$LIB_DIR/common.sh"
 source "$LIB_DIR/workspace.sh"
 source "$LIB_DIR/profile.sh"
+source "$LIB_DIR/artifact-binary.sh"
 
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
@@ -111,7 +115,7 @@ usage()
 $PROJECT_NAME user validation
 
 Usage:
-  $(basename "$0") [options]
+  kubebase validate users [options]
 
 Options:
   --workspace-name NAME
@@ -218,11 +222,32 @@ verify_installed_kubectl()
 
     local manifest="$dir/manifest.json"
 
+    local artifact_dir="$ARTIFACTS_DIR/$requested_platform/kubectl/$requested_version"
+    local artifact_manifest="$artifact_dir/manifest.json"
+
+    local recorded_artifact_file
+    local recorded_artifact_sha256
+    local recorded_source_binary
+
     local binary_file
-    local expected_sha256
-    local actual_sha256
+    local expected_binary_file
+    local expected_binary_sha256
+    local actual_binary_sha256
+
+    local artifact_file
+    local artifact_type
+    local artifact_binary
+    local artifact_sha256
+    local actual_artifact_sha256
+
+    local checksum_file
+    local checksum_sha256
+    local actual_checksum_sha256
+
+    local source_binary_sha256
 
     [ -f "$manifest" ] || return 1
+    [ -f "$artifact_manifest" ] || return 1
 
     if ! jq -e \
         --arg schema "$INSTALL_SCHEMA" \
@@ -244,6 +269,14 @@ verify_installed_kubectl()
 
         and
 
+        (.artifact.file | type) == "string"
+        and
+        (.artifact.sha256 | type) == "string"
+
+        and
+
+        (.binary.sourcePath | type) == "string"
+        and
         (.binary.file | type) == "string"
         and
         (.binary.sha256 | type) == "string"
@@ -253,31 +286,136 @@ verify_installed_kubectl()
         return 1
     fi
 
-    binary_file="$(
-        jq -r '.binary.file' "$manifest"
-    )"
+    if ! jq -e \
+        --arg schema "$ARTIFACT_SCHEMA" \
+        --argjson schemaVersion "$ARTIFACT_SCHEMA_VERSION" \
+        --arg version "$requested_version" \
+        --arg platform "$requested_platform" '
 
-    expected_sha256="$(
-        jq -r '.binary.sha256' "$manifest"
-    )"
+        .schema == $schema
+        and
+        .schemaVersion == $schemaVersion
 
-    expected_sha256="${expected_sha256,,}"
+        and
 
+        .tool == "kubectl"
+        and
+        .version == $version
+        and
+        .platform == $platform
+
+        and
+
+        (.artifact.file | type) == "string"
+        and
+        (.artifact.type | type) == "string"
+        and
+        (.artifact.binary | type) == "string"
+        and
+        (.artifact.sha256 | type) == "string"
+
+        and
+
+        (.checksum.file | type) == "string"
+        and
+        (.checksum.sha256 | type) == "string"
+
+    ' "$artifact_manifest" >/dev/null 2>&1
+    then
+        return 1
+    fi
+
+    recorded_artifact_file="$(jq -r '.artifact.file' "$manifest")"
+    recorded_artifact_sha256="$(jq -r '.artifact.sha256' "$manifest")"
+    recorded_source_binary="$(jq -r '.binary.sourcePath' "$manifest")"
+
+    binary_file="$(jq -r '.binary.file' "$manifest")"
+    expected_binary_sha256="$(jq -r '.binary.sha256' "$manifest")"
+
+    artifact_file="$(jq -r '.artifact.file' "$artifact_manifest")"
+    artifact_type="$(jq -r '.artifact.type' "$artifact_manifest")"
+    artifact_binary="$(jq -r '.artifact.binary' "$artifact_manifest")"
+    artifact_sha256="$(jq -r '.artifact.sha256' "$artifact_manifest")"
+
+    checksum_file="$(jq -r '.checksum.file' "$artifact_manifest")"
+    checksum_sha256="$(jq -r '.checksum.sha256' "$artifact_manifest")"
+
+    recorded_artifact_sha256="${recorded_artifact_sha256,,}"
+    expected_binary_sha256="${expected_binary_sha256,,}"
+    artifact_sha256="${artifact_sha256,,}"
+    checksum_sha256="${checksum_sha256,,}"
+
+    kb_safe_filename "$recorded_artifact_file" || return 1
     kb_safe_filename "$binary_file" || return 1
+    kb_safe_filename "$artifact_file" || return 1
+    kb_safe_relative_path "$artifact_binary" || return 1
+    kb_safe_relative_path "$recorded_source_binary" || return 1
+    kb_safe_filename "$checksum_file" || return 1
+
+    [[ "$recorded_artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$expected_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$checksum_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    expected_binary_file="kubectl"
+
+    case "$requested_platform" in
+        windows-*)
+            expected_binary_file="kubectl.exe"
+            ;;
+    esac
+
+    [ "$binary_file" = "$expected_binary_file" ] || return 1
+
+    [ "$recorded_artifact_file" = "$artifact_file" ] || return 1
+    [ "$recorded_artifact_sha256" = "$artifact_sha256" ] || return 1
+    [ "$recorded_source_binary" = "$artifact_binary" ] || return 1
+
+    [ -f "$artifact_dir/$artifact_file" ] || return 1
+    [ -f "$artifact_dir/$checksum_file" ] || return 1
+
+    actual_artifact_sha256="$(
+        sha256sum "$artifact_dir/$artifact_file" |
+        awk '{print $1}'
+    )"
+
+    actual_artifact_sha256="${actual_artifact_sha256,,}"
+
+    [ "$actual_artifact_sha256" = "$artifact_sha256" ] || return 1
+
+    actual_checksum_sha256="$(
+        sha256sum "$artifact_dir/$checksum_file" |
+        awk '{print $1}'
+    )"
+
+    actual_checksum_sha256="${actual_checksum_sha256,,}"
+
+    [ "$actual_checksum_sha256" = "$checksum_sha256" ] || return 1
+
+    if ! source_binary_sha256="$(
+        kb_artifact_binary_sha256 \
+            "$artifact_dir/$artifact_file" \
+            "$artifact_type" \
+            "$artifact_binary"
+    )"
+    then
+        return 1
+    fi
+
+    [ "$source_binary_sha256" = "$expected_binary_sha256" ] || return 1
 
     [ -f "$dir/$binary_file" ] || return 1
     [ -x "$dir/$binary_file" ] || return 1
 
-    actual_sha256="$(
+    actual_binary_sha256="$(
         sha256sum "$dir/$binary_file" |
         awk '{print $1}'
     )"
 
-    actual_sha256="${actual_sha256,,}"
+    actual_binary_sha256="${actual_binary_sha256,,}"
 
-    [ "$actual_sha256" = "$expected_sha256" ]
+    [ "$actual_binary_sha256" = "$source_binary_sha256" ]
 }
-
 
 # ----------------------------------------------------------------------
 # Arguments
@@ -369,6 +507,7 @@ WORKSPACE_DIR="$WORKSPACE_ROOT/$WORKSPACE_NAME"
 WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 
 CLUSTERS_DIR="$WORKSPACE_DIR/clusters"
+ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
 TOOLS_DIR="$WORKSPACE_DIR/tools"
 
 
@@ -377,6 +516,9 @@ TOOLS_DIR="$WORKSPACE_DIR/tools"
 
 [ -d "$CLUSTERS_DIR" ] || \
     kb_fail "cluster directory not found: $CLUSTERS_DIR"
+
+[ -d "$ARTIFACTS_DIR" ] || \
+    kb_fail "artifact directory not found: $ARTIFACTS_DIR"
 
 [ -d "$TOOLS_DIR" ] || \
     kb_fail "tools directory not found: $TOOLS_DIR"
@@ -435,6 +577,7 @@ echo "Repository : $REPO_ROOT"
 echo "Workspace  : $WORKSPACE_DIR"
 echo "Config dir : $CONFIG_DIR"
 echo "Clusters   : $CLUSTERS_DIR"
+echo "Artifacts  : $ARTIFACTS_DIR"
 echo "Tools      : $TOOLS_DIR"
 echo "Platform   : $HOST_PLATFORM"
 echo "Network    : disabled"

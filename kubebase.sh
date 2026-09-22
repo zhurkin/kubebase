@@ -253,6 +253,10 @@ case "$COMMAND" in
 
     use)
         shift
+        if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+            echo "Usage: kubebase use [CLUSTER/USER]"
+            exit 0
+        fi
         exec "$SCRIPTS_DIR/70-profile.sh" use-direct "$@"
         ;;
 
@@ -268,6 +272,10 @@ case "$COMMAND" in
 
     ns)
         shift
+        if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+            echo "Usage: kubebase ns [NAME|--clear]"
+            exit 0
+        fi
         exec "$SCRIPTS_DIR/80-navigation.sh" ns-direct "$@"
         ;;
 
@@ -278,11 +286,19 @@ case "$COMMAND" in
 
     group)
         shift
+        if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+            echo "Usage: kubebase group [GROUP|--clear]"
+            exit 0
+        fi
         exec "$SCRIPTS_DIR/80-navigation.sh" group-direct "$@"
         ;;
 
     off)
         shift
+        if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+            echo "Usage: kubebase off"
+            exit 0
+        fi
         exec "$SCRIPTS_DIR/70-profile.sh" off-direct "$@"
         ;;
 
@@ -312,6 +328,10 @@ case "$COMMAND" in
         ;;
 
     help|-h|--help)
+        if [ "$#" -gt 1 ]; then
+            echo "ERROR: help takes no arguments" >&2
+            exit 2
+        fi
         usage
         ;;
 

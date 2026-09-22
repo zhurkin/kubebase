@@ -30,7 +30,7 @@ PROJECT_NAME="KubeBase"
 CLUSTER_SCHEMA="kubebase.cluster"
 
 ARTIFACT_SCHEMA="kubebase.artifact"
-ARTIFACT_SCHEMA_VERSION=1
+ARTIFACT_SCHEMA_VERSION=2
 
 INSTALL_SCHEMA="kubebase.toolInstall"
 INSTALL_SCHEMA_VERSION=1
@@ -49,6 +49,7 @@ SCRIPT_DIR="$(
 
 LIB_DIR="$SCRIPT_DIR/lib"
 source "$LIB_DIR/common.sh"
+source "$LIB_DIR/artifact-binary.sh"
 
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
@@ -120,7 +121,7 @@ usage()
 $PROJECT_NAME tool installation
 
 Usage:
-  $(basename "$0") [options]
+  kubebase install [options]
 
 Options:
   --workspace-name NAME
@@ -153,13 +154,13 @@ Options:
       Show this help.
 
 Examples:
-  $(basename "$0")
+  kubebase install
 
-  $(basename "$0") --dry-run
+  kubebase install --dry-run
 
-  $(basename "$0") --platform windows-amd64
+  kubebase install --platform windows-amd64
 
-  $(basename "$0") --all-platforms
+  kubebase install --all-platforms
 EOF_USAGE
 }
 
@@ -339,8 +340,10 @@ verify_artifact_store()
     local checksum_type
 
     local expected
+    local checksum_sha256
     local checksum_expected
     local actual
+    local checksum_actual
 
 
     [ -f "$manifest" ] || \
@@ -385,6 +388,8 @@ verify_artifact_store()
         (.checksum.file | type) == "string"
         and
         (.checksum.type | type) == "string"
+        and
+        (.checksum.sha256 | type) == "string"
 
     ' "$manifest" >/dev/null 2>&1
     then
@@ -424,6 +429,14 @@ verify_artifact_store()
         ' "$manifest"
     )"
 
+    checksum_sha256="$(
+        jq -r '
+            .checksum.sha256
+        ' "$manifest"
+    )"
+
+    checksum_sha256="${checksum_sha256,,}"
+
     expected="$(
         jq -r '
             .artifact.sha256
@@ -462,6 +475,18 @@ verify_artifact_store()
         return 1
 
 
+    checksum_actual="$(
+        sha256sum "$dir/$checksum_file" |
+        awk '{print $1}'
+    )"
+
+    checksum_actual="${checksum_actual,,}"
+
+
+    [ "$checksum_actual" = "$checksum_sha256" ] || \
+        return 1
+
+
     actual="$(
         sha256sum "$dir/$artifact_file" |
         awk '{print $1}'
@@ -492,58 +517,6 @@ verify_artifact_store()
 
 
     return 0
-}
-
-
-# ----------------------------------------------------------------------
-# Archive member lookup
-# ----------------------------------------------------------------------
-
-find_tar_member()
-{
-    local archive="$1"
-    local wanted="$2"
-
-
-    tar --warning=no-unknown-keyword -tzf "$archive" |
-        awk \
-            -v wanted="$wanted" '
-            {
-                original = $0
-                normalized = $0
-
-                sub(/^\.\//, "", normalized)
-
-                if (!found && normalized == wanted) {
-                    print original
-                    found = 1
-                }
-            }
-        '
-}
-
-
-find_zip_member()
-{
-    local archive="$1"
-    local wanted="$2"
-
-
-    unzip -Z1 "$archive" |
-        awk \
-            -v wanted="$wanted" '
-            {
-                original = $0
-                normalized = $0
-
-                sub(/^\.\//, "", normalized)
-
-                if (!found && normalized == wanted) {
-                    print original
-                    found = 1
-                }
-            }
-        '
 }
 
 
@@ -603,6 +576,10 @@ verify_existing_install()
     local requested_platform="$4"
 
     local artifact_sha256="$5"
+    local artifact_file="$6"
+    local source_binary="$7"
+    local expected_binary_file="$8"
+    local source_binary_sha256="$9"
 
     local manifest="$dir/manifest.json"
 
@@ -611,7 +588,9 @@ verify_existing_install()
     local expected_binary_sha256
     local actual_binary_sha256
 
+    local recorded_artifact_file
     local recorded_artifact_sha256
+    local recorded_source_binary
 
 
     [ -f "$manifest" ] || \
@@ -639,10 +618,14 @@ verify_existing_install()
 
         and
 
+        (.artifact.file | type) == "string"
+        and
         (.artifact.sha256 | type) == "string"
 
         and
 
+        (.binary.sourcePath | type) == "string"
+        and
         (.binary.file | type) == "string"
         and
         (.binary.sha256 | type) == "string"
@@ -667,9 +650,21 @@ verify_existing_install()
         ' "$manifest"
     )"
 
+    recorded_artifact_file="$(
+        jq -r '
+            .artifact.file
+        ' "$manifest"
+    )"
+
     recorded_artifact_sha256="$(
         jq -r '
             .artifact.sha256
+        ' "$manifest"
+    )"
+
+    recorded_source_binary="$(
+        jq -r '
+            .binary.sourcePath
         ' "$manifest"
     )"
 
@@ -677,17 +672,42 @@ verify_existing_install()
     expected_binary_sha256="${expected_binary_sha256,,}"
     recorded_artifact_sha256="${recorded_artifact_sha256,,}"
     artifact_sha256="${artifact_sha256,,}"
+    source_binary_sha256="${source_binary_sha256,,}"
 
 
     kb_safe_filename "$binary_file" || \
+        return 1
+
+    [[ "$expected_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+        return 1
+
+    [[ "$recorded_artifact_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+        return 1
+
+    [[ "$source_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+        return 1
+
+
+    [ "$expected_binary_sha256" = "$source_binary_sha256" ] || \
+        return 1
+
+    [ "$binary_file" = "$expected_binary_file" ] || \
+        return 1
+
+    [ "$recorded_artifact_file" = "$artifact_file" ] || \
+        return 1
+
+    [ "$recorded_source_binary" = "$source_binary" ] || \
+        return 1
+
+    [ "$recorded_artifact_sha256" = "$artifact_sha256" ] || \
         return 1
 
 
     [ -f "$dir/$binary_file" ] || \
         return 1
 
-
-    [ "$recorded_artifact_sha256" = "$artifact_sha256" ] || \
+    [ -x "$dir/$binary_file" ] || \
         return 1
 
 
@@ -750,8 +770,8 @@ while [ "$#" -gt 0 ]; do
 
 
             if [ "$ALL_PLATFORMS" -ne 0 ]; then
-                kb_fail \
-                    "--platform and --all-platforms cannot be used together"
+                echo "ERROR: --platform and --all-platforms cannot be used together" >&2
+                exit 2
             fi
 
 
@@ -764,8 +784,8 @@ while [ "$#" -gt 0 ]; do
         --all-platforms)
 
             if [ -n "$PLATFORM_FILTER" ]; then
-                kb_fail \
-                    "--platform and --all-platforms cannot be used together"
+                echo "ERROR: --platform and --all-platforms cannot be used together" >&2
+                exit 2
             fi
 
 
@@ -1259,6 +1279,18 @@ do
     )"
 
 
+    if ! SOURCE_BINARY_SHA256="$(
+        kb_artifact_binary_sha256 \
+            "$ARTIFACT_DIR/$ARTIFACT_FILE" \
+            "$ARTIFACT_TYPE" \
+            "$SOURCE_BINARY"
+    )"
+    then
+        kb_fail \
+            "unable to verify source binary '$SOURCE_BINARY' in artifact: $ARTIFACT_DIR/$ARTIFACT_FILE"
+    fi
+
+
     echo "  artifact    : verified"
     echo "  source      : $ARTIFACT_DIR/$ARTIFACT_FILE"
 
@@ -1274,7 +1306,11 @@ do
             "$TOOL_NAME" \
             "$TOOL_VERSION" \
             "$TOOL_PLATFORM" \
-            "$ARTIFACT_SHA256"
+            "$ARTIFACT_SHA256" \
+            "$ARTIFACT_FILE" \
+            "$SOURCE_BINARY" \
+            "$INSTALLED_FILE" \
+            "$SOURCE_BINARY_SHA256"
         then
 
             echo "  status      : already installed in shared store"
@@ -1352,7 +1388,7 @@ do
 
 
             TAR_MEMBER="$(
-                find_tar_member \
+                kb_find_tar_member \
                     "$ARTIFACT_DIR/$ARTIFACT_FILE" \
                     "$SOURCE_BINARY"
             )"
@@ -1379,7 +1415,7 @@ do
 
 
             ZIP_MEMBER="$(
-                find_zip_member \
+                kb_find_zip_member \
                     "$ARTIFACT_DIR/$ARTIFACT_FILE" \
                     "$SOURCE_BINARY"
             )"
@@ -1425,6 +1461,11 @@ do
     )"
 
     BINARY_SHA256="${BINARY_SHA256,,}"
+
+
+    [ "$BINARY_SHA256" = "$SOURCE_BINARY_SHA256" ] || \
+        kb_fail \
+            "installed binary SHA-256 does not match source artifact: $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
 
 
     # ------------------------------------------------------------------
