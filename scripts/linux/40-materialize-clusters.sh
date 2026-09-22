@@ -35,6 +35,10 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/toolchain.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -63,8 +67,6 @@ EXISTING_LINKS=0
 
 CLUSTER_COUNT=0
 USER_COUNT=0
-LEGACY_ENV_DIRS_REMOVED=0
-LEGACY_ENV_DIRS_RETAINED=0
 
 TOOLCHAIN_COUNT=0
 TOOLCHAIN_SKIPPED=0
@@ -77,13 +79,6 @@ TOOLCHAIN_COMMANDS=0
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
 
 usage()
 {
@@ -127,7 +122,7 @@ ensure_directory()
 
     if [ -L "$path" ]; then
 
-        fail \
+        kb_fail \
             "expected directory but found symlink: $path"
 
     fi
@@ -137,7 +132,7 @@ ensure_directory()
 
         if [ ! -d "$path" ]; then
 
-            fail \
+            kb_fail \
                 "expected directory but found another filesystem object: $path"
 
         fi
@@ -154,38 +149,6 @@ ensure_directory()
     CREATED_DIRS=$((CREATED_DIRS + 1))
 }
 
-
-cleanup_legacy_environment_tree()
-{
-    local path="$1"
-
-    if [ -L "$path" ]; then
-        echo "WARNING: retaining legacy environments path because it is a symlink: $path" >&2
-        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
-        return 0
-    fi
-
-    if [ ! -e "$path" ]; then
-        return 0
-    fi
-
-    if [ ! -d "$path" ]; then
-        echo "WARNING: retaining legacy environments path because it is not a directory: $path" >&2
-        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
-        return 0
-    fi
-
-    # Remove only empty directories. Any file, symlink, or non-empty
-    # directory causes the remaining legacy tree to be retained.
-    find "$path" -depth -type d -empty -delete 2>/dev/null || true
-
-    if [ -e "$path" ]; then
-        echo "WARNING: retaining non-empty legacy environments tree: $path" >&2
-        LEGACY_ENV_DIRS_RETAINED=$((LEGACY_ENV_DIRS_RETAINED + 1))
-    else
-        LEGACY_ENV_DIRS_REMOVED=$((LEGACY_ENV_DIRS_REMOVED + 1))
-    fi
-}
 
 
 ensure_cluster_link()
@@ -253,7 +216,7 @@ ensure_cluster_link()
 
     if [ -e "$link_path" ]; then
 
-        fail \
+        kb_fail \
             "refusing to overwrite non-symlink cluster definition: $link_path"
 
     fi
@@ -264,76 +227,6 @@ ensure_cluster_link()
         "$link_path"
 
     CREATED_LINKS=$((CREATED_LINKS + 1))
-}
-
-
-detect_host_platform()
-{
-    local os_name
-    local arch_name
-
-
-    case "$(uname -s)" in
-
-        Linux)
-            os_name="linux"
-            ;;
-
-        *)
-            fail \
-                "unsupported host operating system for Linux materializer: $(uname -s)"
-            ;;
-
-    esac
-
-
-    case "$(uname -m)" in
-
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-
-        *)
-            fail \
-                "unsupported host architecture: $(uname -m)"
-            ;;
-
-    esac
-
-
-    printf '%s-%s\n' \
-        "$os_name" \
-        "$arch_name"
-}
-
-
-safe_filename()
-{
-    local value="$1"
-
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
-}
-
-
-command_name_for_tool()
-{
-    local tool="$1"
-
-    case "$tool" in
-
-        krew)
-            printf 'kubectl-krew\n'
-            ;;
-
-        *)
-            printf '%s\n' "$tool"
-            ;;
-
-    esac
 }
 
 
@@ -408,7 +301,7 @@ verify_installed_tool()
     expected_sha256="${expected_sha256,,}"
 
 
-    safe_filename "$binary_file" || \
+    kb_safe_filename "$binary_file" || \
         return 1
 
     [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || \
@@ -511,7 +404,7 @@ ensure_toolchain_link()
 
     if [ -e "$link_path" ]; then
 
-        fail \
+        kb_fail \
             "refusing to overwrite non-symlink toolchain command: $link_path"
 
     fi
@@ -605,17 +498,17 @@ materialize_cluster_toolchain()
 
 
         command_name="$(
-            command_name_for_tool "$tool_name"
+            kb_tool_command_name "$tool_name"
         )"
 
-        safe_filename "$command_name" || \
-            fail \
+        kb_safe_filename "$command_name" || \
+            kb_fail \
                 "invalid toolchain command name '$command_name' for tool '$tool_name'"
 
 
         if [ -n "${expected_commands[$command_name]+x}" ]; then
 
-            fail \
+            kb_fail \
                 "cluster '$cluster_name' maps multiple tools to command '$command_name'"
 
         fi
@@ -630,7 +523,7 @@ materialize_cluster_toolchain()
             "$platform"
         then
 
-            fail \
+            kb_fail \
                 "cluster '$cluster_name' requires missing or corrupt installed tool: $tool_name $tool_version $platform; run: kubebase install"
 
         fi
@@ -690,7 +583,7 @@ materialize_cluster_toolchain()
 
     if [ -L "$toolchain_dir" ]; then
 
-        fail \
+        kb_fail \
             "expected toolchain directory but found symlink: $toolchain_dir"
 
     fi
@@ -699,18 +592,18 @@ materialize_cluster_toolchain()
     if [ -e "$toolchain_dir" ]; then
 
         [ -d "$toolchain_dir" ] || \
-            fail \
+            kb_fail \
                 "expected toolchain directory but found another filesystem object: $toolchain_dir"
 
         [ -f "$manifest" ] || \
-            fail \
+            kb_fail \
                 "refusing to adopt unmanaged toolchain directory: $toolchain_dir"
 
         validate_existing_toolchain_manifest \
             "$manifest" \
             "$cluster_name" \
             "$platform" || \
-            fail \
+            kb_fail \
                 "invalid existing KubeBase toolchain manifest: $manifest"
 
         toolchain_existed=1
@@ -738,7 +631,7 @@ materialize_cluster_toolchain()
 
         if [ ! -L "$existing_path" ]; then
 
-            fail \
+            kb_fail \
                 "unexpected non-symlink object in toolchain bin directory: $existing_path"
 
         fi
@@ -800,7 +693,7 @@ materialize_cluster_toolchain()
 
 
         [ -x "$link_path" ] || \
-            fail \
+            kb_fail \
                 "materialized toolchain command does not resolve to an executable: $link_path"
 
     done
@@ -818,7 +711,7 @@ materialize_cluster_toolchain()
 
 
         [ -L "$existing_path" ] || \
-            fail \
+            kb_fail \
                 "refusing to remove non-symlink toolchain object: $existing_path"
 
         rm -- "$existing_path"
@@ -909,14 +802,14 @@ done
 # ----------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || \
-    fail "jq is required"
+    kb_fail "jq is required"
 
 command -v sha256sum >/dev/null 2>&1 || \
-    fail "sha256sum is required"
+    kb_fail "sha256sum is required"
 
 
 [ -x "$CONFIG_VALIDATOR" ] || \
-    fail "configuration validator not found or not executable: $CONFIG_VALIDATOR"
+    kb_fail "configuration validator not found or not executable: $CONFIG_VALIDATOR"
 
 
 # ----------------------------------------------------------------------
@@ -935,14 +828,14 @@ command -v sha256sum >/dev/null 2>&1 || \
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 
-    fail \
+    kb_fail \
         "invalid workspace name: $WORKSPACE_NAME"
 
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail "workspace root not found: $WORKSPACE_ROOT"
+    kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -955,11 +848,11 @@ WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 
 
 [ -d "$WORKSPACE_DIR" ] || \
-    fail "workspace not found: $WORKSPACE_DIR"
+    kb_fail "workspace not found: $WORKSPACE_DIR"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
-    fail "workspace configuration not found: $WORKSPACE_FILE"
+    kb_fail "workspace configuration not found: $WORKSPACE_FILE"
 
 
 # ----------------------------------------------------------------------
@@ -971,13 +864,13 @@ TOOLS_DIR="$WORKSPACE_DIR/tools"
 CONFIG_LINK="$WORKSPACE_DIR/config"
 
 HOST_PLATFORM="$(
-    detect_host_platform
+    kb_detect_host_platform "Linux materializer"
 )"
 
 
 if [ ! -d "$CLUSTERS_DIR" ]; then
 
-    fail \
+    kb_fail \
         "workspace clusters directory not found: $CLUSTERS_DIR"
 
 fi
@@ -985,7 +878,7 @@ fi
 
 if [ ! -d "$TOOLS_DIR" ]; then
 
-    fail \
+    kb_fail \
         "workspace tools directory not found: $TOOLS_DIR; run: kubebase init"
 
 fi
@@ -993,7 +886,7 @@ fi
 
 if [ ! -d "$CONFIG_LINK" ]; then
 
-    fail \
+    kb_fail \
         "workspace config path not found: $CONFIG_LINK; run: kubebase init"
 
 fi
@@ -1022,7 +915,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -1081,14 +974,8 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
 
     CLUSTER_DIR="$CLUSTERS_DIR/$CLUSTER_NAME"
     USERS_DIR="$CLUSTER_DIR/users"
-    LEGACY_ENVIRONMENTS_DIR="$CLUSTER_DIR/environments"
-
-
     ensure_directory "$CLUSTER_DIR"
     ensure_directory "$USERS_DIR"
-
-    cleanup_legacy_environment_tree "$LEGACY_ENVIRONMENTS_DIR"
-
 
     # ------------------------------------------------------------------
     # Link materialized cluster back to its source definition.
@@ -1187,11 +1074,6 @@ echo "  existing dirs  : $EXISTING_DIRS"
 echo "  created links  : $CREATED_LINKS"
 echo "  updated links  : $UPDATED_LINKS"
 echo "  existing links : $EXISTING_LINKS"
-
-echo
-echo "Legacy cleanup:"
-echo "  environment trees removed  : $LEGACY_ENV_DIRS_REMOVED"
-echo "  environment trees retained : $LEGACY_ENV_DIRS_RETAINED"
 
 echo
 

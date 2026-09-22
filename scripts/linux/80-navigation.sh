@@ -4,6 +4,20 @@ set -euo pipefail
 
 
 # ----------------------------------------------------------------------
+# Paths / libraries
+# ----------------------------------------------------------------------
+
+SCRIPT_DIR="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    pwd -P
+)"
+
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/namespace-inventory.sh"
+
+
+# ----------------------------------------------------------------------
 # KubeBase
 # Step 80 - Namespace and optional group navigation
 # Linux / Bash
@@ -25,9 +39,6 @@ set -euo pipefail
 
 PROJECT_NAME="KubeBase"
 
-INVENTORY_SCHEMA="kubebase.namespaceInventory"
-INVENTORY_SCHEMA_VERSION=2
-
 SESSION_SCHEMA="kubebase.session"
 SESSION_SCHEMA_VERSION=1
 
@@ -45,8 +56,6 @@ INVENTORY_NOTE=""
 LIVE_ERROR=""
 
 KUBECTL_BIN=""
-CACHE_ROOT=""
-CACHE_DIR=""
 CACHE_FILE=""
 
 
@@ -54,121 +63,47 @@ CACHE_FILE=""
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
-warn()
-{
-    echo "WARNING: $*" >&2
-}
-
-
-shell_export()
-{
-    local name="$1"
-    local value="$2"
-
-    printf 'export %s=%q\n' "$name" "$value"
-}
-
-
-shell_unset()
-{
-    local name="$1"
-
-    printf 'unset %s\n' "$name"
-}
-
-
-first_nonempty_line()
-{
-    local text="$1"
-
-    awk '
-        NF {
-            print
-            exit
-        }
-    ' <<< "$text"
-}
-
-
-namespace_name_is_valid()
-{
-    local value="$1"
-
-    [ "${#value}" -le 63 ] || return 1
-    [[ "$value" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]
-}
-
-
-group_id_from_namespace_json()
-{
-    jq -r '
-        (
-            .metadata.labels["field.cattle.io/projectId"]
-            // ""
-        ) as $label
-        |
-        (
-            .metadata.annotations["field.cattle.io/projectId"]
-            // ""
-        ) as $annotation
-        |
-        if $label != "" then
-            $label
-        elif $annotation != "" then
-            ($annotation | split(":") | last)
-        else
-            ""
-        end
-    '
-}
-
-
 require_active_profile()
 {
     [ "${KUBEBASE_ACTIVE:-}" = "1" ] || \
-        fail "no active KubeBase profile; run 'kubebase use' first"
+        kb_fail "no active KubeBase profile; run 'kubebase use' first"
 
     [ -n "${KUBEBASE_WORKSPACE:-}" ] || \
-        fail "active profile has no workspace"
+        kb_fail "active profile has no workspace"
 
     [ -n "${KUBEBASE_CLUSTER:-}" ] || \
-        fail "active profile has no cluster"
+        kb_fail "active profile has no cluster"
 
     [ -n "${KUBEBASE_USER:-}" ] || \
-        fail "active profile has no user"
+        kb_fail "active profile has no user"
 
     [ -n "${KUBEBASE_CONTEXT:-}" ] || \
-        fail "active profile has no context"
+        kb_fail "active profile has no context"
 
     [ -n "${KUBEBASE_TOOLCHAIN_BIN:-}" ] || \
-        fail "active profile has no toolchain"
+        kb_fail "active profile has no toolchain"
 
     [ -n "${KUBEBASE_EFFECTIVE_KUBECONFIG:-}" ] || \
-        fail "active profile has no effective kubeconfig"
+        kb_fail "active profile has no effective kubeconfig"
 
     [ -n "${KUBEBASE_SESSION_DIR:-}" ] || \
-        fail "active profile has no session directory"
+        kb_fail "active profile has no session directory"
 
     KUBECTL_BIN="$KUBEBASE_TOOLCHAIN_BIN/kubectl"
 
     [ -x "$KUBECTL_BIN" ] || \
-        fail "active profile kubectl is missing or not executable: $KUBECTL_BIN"
+        kb_fail "active profile kubectl is missing or not executable: $KUBECTL_BIN"
 
-    [ -f "$KUBEBASE_EFFECTIVE_KUBECONFIG" ] || \
-        fail "effective kubeconfig not found: $KUBEBASE_EFFECTIVE_KUBECONFIG"
+    kb_require_readable_file \
+        "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
+        "effective kubeconfig"
 
     [ -d "$KUBEBASE_SESSION_DIR" ] || \
-        fail "active KubeBase session not found: $KUBEBASE_SESSION_DIR"
+        kb_fail "active KubeBase session not found: $KUBEBASE_SESSION_DIR"
 
-    [ -f "$KUBEBASE_SESSION_DIR/session.json" ] || \
-        fail "active KubeBase session metadata not found"
+    kb_require_readable_json_file \
+        "$KUBEBASE_SESSION_DIR/session.json" \
+        "active KubeBase session metadata"
 
     jq -e \
         --arg schema "$SESSION_SCHEMA" \
@@ -189,72 +124,19 @@ require_active_profile()
         and
         .profile.context == $context
     ' "$KUBEBASE_SESSION_DIR/session.json" >/dev/null 2>&1 || \
-        fail "active KubeBase session metadata does not match the shell profile"
+        kb_fail "active KubeBase session metadata does not match the shell profile"
 
-    CACHE_ROOT="$KUBEBASE_WORKSPACE/.kubebase/cache"
-    CACHE_DIR="$CACHE_ROOT/namespaces/$KUBEBASE_CLUSTER"
-    CACHE_FILE="$CACHE_DIR/$KUBEBASE_USER.json"
-}
-
-
-ensure_cache_dir()
-{
-    umask 077
-
-    [ ! -L "$KUBEBASE_WORKSPACE/.kubebase" ] || \
-        fail "internal KubeBase state must not be a symlink"
-
-    if [ ! -d "$KUBEBASE_WORKSPACE/.kubebase" ]; then
-        mkdir -- "$KUBEBASE_WORKSPACE/.kubebase"
-    fi
-
-    chmod 700 "$KUBEBASE_WORKSPACE/.kubebase"
-
-    local path
-
-    for path in \
-        "$CACHE_ROOT" \
-        "$CACHE_ROOT/namespaces" \
-        "$CACHE_DIR"
-    do
-        [ ! -L "$path" ] || \
-            fail "KubeBase cache path must not be a symlink: $path"
-
-        if [ -e "$path" ] && [ ! -d "$path" ]; then
-            fail "KubeBase cache path is not a directory: $path"
-        fi
-
-        if [ ! -d "$path" ]; then
-            mkdir -- "$path"
-        fi
-
-        chmod 700 "$path"
-    done
+    CACHE_FILE="$(kb_namespace_cache_v2_path "$KUBEBASE_WORKSPACE" "$KUBEBASE_CLUSTER" "$KUBEBASE_USER")"
 }
 
 
 cache_is_valid()
 {
-    [ -f "$CACHE_FILE" ] && [ ! -L "$CACHE_FILE" ] || return 1
-
-    jq -e \
-        --arg schema "$INVENTORY_SCHEMA" \
-        --argjson version "$INVENTORY_SCHEMA_VERSION" \
-        --arg cluster "$KUBEBASE_CLUSTER" \
-        --arg user "$KUBEBASE_USER" \
-        --arg context "$KUBEBASE_CONTEXT" '
-        .schema == $schema
-        and
-        (.schemaVersion == 1 or .schemaVersion == $version)
-        and
-        .profile.cluster == $cluster
-        and
-        .profile.user == $user
-        and
-        .profile.context == $context
-        and
-        (.entries | type) == "array"
-    ' "$CACHE_FILE" >/dev/null 2>&1
+    kb_namespace_cache_v2_valid \
+        "$CACHE_FILE" \
+        "$KUBEBASE_CLUSTER" \
+        "$KUBEBASE_USER" \
+        "$KUBEBASE_CONTEXT"
 }
 
 
@@ -262,18 +144,7 @@ load_cache()
 {
     cache_is_valid || return 1
 
-    INVENTORY_JSON="$(
-        jq \
-            --argjson version "$INVENTORY_SCHEMA_VERSION" '
-            .schemaVersion = $version
-            | .entries |= map(
-                {
-                    name: .name,
-                    groupId: (.groupId // .projectId // null)
-                }
-            )
-        ' "$CACHE_FILE"
-    )"
+    INVENTORY_JSON="$(kb_namespace_cache_v2_load "$CACHE_FILE")"
     INVENTORY_SOURCE="cache"
     INVENTORY_METHOD="$(jq -r '.method // "unknown"' <<< "$INVENTORY_JSON")"
     INVENTORY_COMPLETE="$(jq -r '.complete // false' <<< "$INVENTORY_JSON")"
@@ -286,263 +157,41 @@ load_cache()
 write_cache()
 {
     local inventory="$1"
-    local temp
 
-    ensure_cache_dir
+    kb_namespace_cache_v2_write \
+        "$KUBEBASE_WORKSPACE" \
+        "$KUBEBASE_CLUSTER" \
+        "$KUBEBASE_USER" \
+        "$inventory"
 
-    temp="$CACHE_FILE.tmp.$$"
-
-    printf '%s\n' "$inventory" > "$temp"
-    chmod 600 "$temp"
-    mv -f -- "$temp" "$CACHE_FILE"
-}
-
-
-normalized_inventory()
-{
-    local entries_json="$1"
-    local method="$2"
-    local complete="$3"
-    local timestamp="$4"
-
-    jq -n \
-        --arg schema "$INVENTORY_SCHEMA" \
-        --argjson schemaVersion "$INVENTORY_SCHEMA_VERSION" \
-        --arg cluster "$KUBEBASE_CLUSTER" \
-        --arg user "$KUBEBASE_USER" \
-        --arg context "$KUBEBASE_CONTEXT" \
-        --arg method "$method" \
-        --argjson complete "$complete" \
-        --arg discoveredAt "$timestamp" \
-        --argjson entries "$entries_json" '
-        {
-            schema: $schema,
-            schemaVersion: $schemaVersion,
-            profile: {
-                cluster: $cluster,
-                user: $user,
-                context: $context
-            },
-            discoveredAt: $discoveredAt,
-            method: $method,
-            complete: $complete,
-            entries: (
-                $entries
-                | unique_by(.name)
-                | sort_by(.name)
-            )
-        }
-    '
-}
-
-
-entries_from_namespace_list()
-{
-    jq -c '
-        [
-            .items[]
-            |
-            {
-                name: .metadata.name,
-                groupId: (
-                    .metadata.labels["field.cattle.io/projectId"]
-                    //
-                    (
-                        .metadata.annotations["field.cattle.io/projectId"]
-                        // ""
-                        |
-                        if . == "" then null else (split(":") | last) end
-                    )
-                )
-            }
-        ]
-    '
+    CACHE_FILE="$KB_NAMESPACE_CACHE_FILE"
 }
 
 
 live_discover_inventory()
 {
-    local namespace_json
-    local list_error_file
-    local list_error
-    local review_text
-    local review_error_file
-    local review_error
-    local request_namespace
-    local candidate
-    local candidate_json
-    local candidate_error
-    local candidate_error_file
-    local group_id
-    local entries_file
-    local entries_json
-    local timestamp
-    local -a candidates=()
+    local status=0
 
-    list_error_file="$(mktemp)"
-
-    if namespace_json="$("$KUBECTL_BIN" \
-        --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
-        --context "$KUBEBASE_CONTEXT" \
-        --request-timeout="$REQUEST_TIMEOUT" \
-        get namespaces \
-        -o json \
-        2>"$list_error_file")"
-    then
-        rm -f -- "$list_error_file"
-
-        entries_json="$(entries_from_namespace_list <<< "$namespace_json")"
-        timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-        INVENTORY_JSON="$(
-            normalized_inventory \
-                "$entries_json" \
-                "namespace-list" \
-                true \
-                "$timestamp"
-        )"
-
-        INVENTORY_SOURCE="live"
-        INVENTORY_METHOD="namespace-list"
-        INVENTORY_COMPLETE="true"
-        INVENTORY_TIMESTAMP="$timestamp"
-        INVENTORY_NOTE=""
-
-        write_cache "$INVENTORY_JSON"
-        return 0
-    fi
-
-    list_error="$(cat -- "$list_error_file")"
-    rm -f -- "$list_error_file"
-
-    request_namespace="$($KUBECTL_BIN \
-        --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
-        config view \
-        -o json 2>/dev/null |
-        jq -r \
-            --arg context "$KUBEBASE_CONTEXT" '
-            [
-                .contexts[]
-                | select(.name == $context)
-                | .context.namespace // ""
-            ][0] // ""
-        ' 2>/dev/null || true
-    )"
-
-    if [ -z "$request_namespace" ]; then
-        request_namespace="default"
-    fi
-
-    review_error_file="$(mktemp)"
-
-    # Use kubectl's supported authorization command rather than constructing
-    # SelfSubjectRulesReview with `create --raw`. Some API gateways can reject
-    # the raw POST even though `kubectl auth can-i --list` succeeds for the
-    # same kubeconfig and identity.
-    if ! review_text="$(
+    kb_namespace_discover_live \
         "$KUBECTL_BIN" \
-            --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
-            --context "$KUBEBASE_CONTEXT" \
-            --request-timeout="$REQUEST_TIMEOUT" \
-            auth can-i \
-            --list \
-            --namespace "$request_namespace" \
-            2>"$review_error_file"
-    )"
-    then
-        review_error="$(cat -- "$review_error_file")"
-        rm -f -- "$review_error_file"
+        "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
+        "$KUBEBASE_CONTEXT" \
+        "$KUBEBASE_CLUSTER" \
+        "$KUBEBASE_USER" \
+        "$REQUEST_TIMEOUT" || status=$?
 
-        LIVE_ERROR="namespace list: $(first_nonempty_line "$list_error"); rules review: $(first_nonempty_line "$review_error")"
-        return 1
+    if [ "$status" -ne 0 ]; then
+        LIVE_ERROR="$KB_NAMESPACE_DISCOVERY_ERROR"
+        return "$status"
     fi
 
-    rm -f -- "$review_error_file"
-
-    # `kubectl auth can-i --list` renders a table. Extract Resource Names from
-    # rules whose resource column is exactly `namespaces`. Columns are
-    # separated by two or more spaces, while multiple resource names inside
-    # `[ ... ]` are separated by single spaces.
-    mapfile -t candidates < <(
-        awk -F '[[:space:]][[:space:]]+' '
-            $1 == "namespaces" && $3 ~ /^\[[^]]*\]$/ {
-                names = $3
-                sub(/^\[/, "", names)
-                sub(/\]$/, "", names)
-
-                count = split(names, parts, /[[:space:]]+/)
-                for (i = 1; i <= count; i++) {
-                    if (parts[i] != "" && parts[i] != "*") {
-                        print parts[i]
-                    }
-                }
-            }
-        ' <<< "$review_text" |
-        sort -u
-    )
-
-    entries_file="$(mktemp)"
-    : > "$entries_file"
-
-    for candidate in "${candidates[@]}"; do
-        [ -n "$candidate" ] || continue
-        namespace_name_is_valid "$candidate" || continue
-
-        candidate_error_file="$(mktemp)"
-
-        if candidate_json="$($KUBECTL_BIN \
-            --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
-            --context "$KUBEBASE_CONTEXT" \
-            --request-timeout="$REQUEST_TIMEOUT" \
-            get namespace "$candidate" \
-            -o json \
-            2>"$candidate_error_file")"
-        then
-            group_id="$(group_id_from_namespace_json <<< "$candidate_json")"
-
-            jq -cn \
-                --arg name "$candidate" \
-                --arg groupId "$group_id" '
-                {
-                    name: $name,
-                    groupId: (
-                        if $groupId == "" then null else $groupId end
-                    )
-                }
-            ' >> "$entries_file"
-        else
-            candidate_error="$(cat -- "$candidate_error_file")"
-            : "$candidate_error"
-        fi
-
-        rm -f -- "$candidate_error_file"
-    done
-
-    entries_json="$(jq -s '.' "$entries_file")"
-    rm -f -- "$entries_file"
-
-    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-    INVENTORY_JSON="$(
-        normalized_inventory \
-            "$entries_json" \
-            "auth-can-i" \
-            false \
-            "$timestamp"
-    )"
-
+    INVENTORY_JSON="$KB_NAMESPACE_DISCOVERY_JSON"
     INVENTORY_SOURCE="live"
-    INVENTORY_METHOD="auth-can-i"
-    INVENTORY_COMPLETE="false"
-    INVENTORY_TIMESTAMP="$timestamp"
-    case "$list_error" in
-        *Forbidden*|*forbidden*)
-            INVENTORY_NOTE="cluster-wide namespace LIST is forbidden"
-            ;;
-        *)
-            INVENTORY_NOTE="cluster-wide namespace LIST did not succeed"
-            ;;
-    esac
+    INVENTORY_METHOD="$KB_NAMESPACE_DISCOVERY_METHOD"
+    INVENTORY_COMPLETE="$KB_NAMESPACE_DISCOVERY_COMPLETE"
+    INVENTORY_TIMESTAMP="$(jq -r '.discoveredAt // "unknown"' <<< "$INVENTORY_JSON")"
+    INVENTORY_NOTE="$KB_NAMESPACE_DISCOVERY_NOTE"
+    LIVE_ERROR=""
 
     write_cache "$INVENTORY_JSON"
     return 0
@@ -559,7 +208,7 @@ discover_inventory()
             return 0
         fi
 
-        fail "no valid namespace cache exists for $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+        kb_fail "no valid namespace cache exists for $KUBEBASE_CLUSTER/$KUBEBASE_USER"
     fi
 
     if live_discover_inventory; then
@@ -572,10 +221,10 @@ discover_inventory()
     fi
 
     if [ -n "$LIVE_ERROR" ]; then
-        fail "namespace discovery failed and no valid cache exists: $LIVE_ERROR"
+        kb_fail "namespace discovery failed and no valid cache exists: $LIVE_ERROR"
     fi
 
-    fail "namespace discovery failed and no valid cache exists"
+    kb_fail "namespace discovery failed and no valid cache exists"
 }
 
 
@@ -631,7 +280,6 @@ update_session_navigation()
                 if $namespaceGroup == "" then null else $namespaceGroup end
             )
         }
-        | del(.scope)
     ' "$manifest" > "$temp"
 
     chmod 600 "$temp"
@@ -694,11 +342,11 @@ clear_effective_namespace()
         --kubeconfig "$KUBEBASE_EFFECTIVE_KUBECONFIG" \
         config current-context
     )" != "$KUBEBASE_CONTEXT" ]; then
-        fail "effective kubeconfig context changed while clearing namespace"
+        kb_fail "effective kubeconfig context changed while clearing namespace"
     fi
 
     if [ -n "$(current_effective_namespace)" ]; then
-        fail "effective kubeconfig namespace could not be cleared"
+        kb_fail "effective kubeconfig namespace could not be cleared"
     fi
 }
 
@@ -1090,8 +738,8 @@ command_emit_namespace()
             "" \
             ""
 
-        shell_unset "KUBEBASE_NAMESPACE"
-        shell_unset "KUBEBASE_NAMESPACE_GROUP"
+        kb_shell_unset "KUBEBASE_NAMESPACE"
+        kb_shell_unset "KUBEBASE_NAMESPACE_GROUP"
         return 0
     fi
 
@@ -1099,7 +747,7 @@ command_emit_namespace()
         selector="$(select_namespace_interactively)" || return $?
     fi
 
-    namespace_name_is_valid "$selector" || {
+    kb_namespace_name_is_valid "$selector" || {
         echo "ERROR: invalid Kubernetes namespace name: $selector" >&2
         return 2
     }
@@ -1114,7 +762,7 @@ command_emit_namespace()
         -o json \
         2>"$error_file")"
     then
-        group_id="$(group_id_from_namespace_json <<< "$namespace_json")"
+        group_id="$(kb_namespace_group_id_from_json <<< "$namespace_json")"
     else
         error_text="$(cat -- "$error_file")"
 
@@ -1157,12 +805,12 @@ command_emit_namespace()
         "$selector" \
         "$group_id"
 
-    shell_export "KUBEBASE_NAMESPACE" "$selector"
+    kb_shell_export "KUBEBASE_NAMESPACE" "$selector"
 
     if [ -n "$group_id" ]; then
-        shell_export "KUBEBASE_NAMESPACE_GROUP" "$group_id"
+        kb_shell_export "KUBEBASE_NAMESPACE_GROUP" "$group_id"
     else
-        shell_unset "KUBEBASE_NAMESPACE_GROUP"
+        kb_shell_unset "KUBEBASE_NAMESPACE_GROUP"
     fi
 }
 
@@ -1186,7 +834,7 @@ command_emit_group()
             update_session_navigation "" "" ""
         fi
 
-        shell_unset "KUBEBASE_GROUP"
+        kb_shell_unset "KUBEBASE_GROUP"
         return 0
     fi
 
@@ -1204,9 +852,9 @@ command_emit_group()
     clear_effective_namespace
     update_session_navigation "$selector" "" ""
 
-    shell_export "KUBEBASE_GROUP" "$selector"
-    shell_unset "KUBEBASE_NAMESPACE"
-    shell_unset "KUBEBASE_NAMESPACE_GROUP"
+    kb_shell_export "KUBEBASE_GROUP" "$selector"
+    kb_shell_unset "KUBEBASE_NAMESPACE"
+    kb_shell_unset "KUBEBASE_NAMESPACE_GROUP"
 }
 
 
@@ -1243,7 +891,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 case "$SUBCOMMAND" in
-    namespaces|groups|projects)
+    namespaces|groups)
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --cached)
@@ -1290,7 +938,7 @@ EOF_USAGE
         command_direct_namespace
         ;;
 
-    group-direct|project-direct)
+    group-direct)
         command_direct_group
         ;;
 
@@ -1303,7 +951,7 @@ EOF_USAGE
         command_emit_namespace "${1:-}"
         ;;
 
-    __nav-group|__nav-project)
+    __nav-group)
         [ "$#" -le 1 ] || {
             echo "ERROR: usage: kubebase group [GROUP|--clear]" >&2
             exit 2

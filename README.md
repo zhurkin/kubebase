@@ -132,6 +132,8 @@ Credentials, kubeconfigs, and downloaded artifacts are intentionally kept outsid
 
 KubeBase also validates permissions on sensitive local files and avoids overwriting user-managed credential data.
 
+KubeBase workspaces are intended to be operated by their owning user. Running normal KubeBase commands with `sudo` can create root-owned session/cache files that the regular user cannot access later. Permission problems are reported separately from malformed JSON; use elevated privileges only to repair ownership when required.
+
 ## Status
 
 KubeBase is currently under active development.

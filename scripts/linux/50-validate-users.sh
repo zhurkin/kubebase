@@ -40,6 +40,11 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/workspace.sh"
+source "$LIB_DIR/profile.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -86,13 +91,6 @@ CLUSTER_FILES=()
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
 record_error()
 {
     echo "ERROR: $*" >&2
@@ -131,95 +129,6 @@ Options:
   -h, --help
       Show this help.
 EOF_USAGE
-}
-
-
-detect_host_platform()
-{
-    local os_name
-    local arch_name
-
-    case "$(uname -s)" in
-        Linux)
-            os_name="linux"
-            ;;
-        *)
-            fail "unsupported host operating system: $(uname -s)"
-            ;;
-    esac
-
-    case "$(uname -m)" in
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-        *)
-            fail "unsupported host architecture: $(uname -m)"
-            ;;
-    esac
-
-    printf '%s-%s\n' "$os_name" "$arch_name"
-}
-
-
-safe_filename()
-{
-    local value="$1"
-
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
-}
-
-
-safe_relative_path()
-{
-    local value="$1"
-    local part
-    local -a parts
-
-    [ -n "$value" ] || return 1
-    [[ "$value" != /* ]] || return 1
-
-    case "$value" in
-        *$'\n'*|*$'\r'*|*$'\t'*)
-            return 1
-            ;;
-    esac
-
-    IFS='/' read -r -a parts <<< "$value"
-
-    for part in "${parts[@]}"; do
-        [ -n "$part" ] || return 1
-        [ "$part" != "." ] || return 1
-        [ "$part" != ".." ] || return 1
-    done
-
-    return 0
-}
-
-
-file_permissions_are_private()
-{
-    local path="$1"
-    local mode
-    local mode_value
-
-    mode="$(
-        stat -Lc '%a' "$path"
-    )"
-
-    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-
-    mode_value=$((8#$mode))
-
-    (( (mode_value & 077) == 0 ))
-}
-
-
-file_mode()
-{
-    stat -Lc '%a' "$1"
 }
 
 
@@ -354,7 +263,7 @@ verify_installed_kubectl()
 
     expected_sha256="${expected_sha256,,}"
 
-    safe_filename "$binary_file" || return 1
+    kb_safe_filename "$binary_file" || return 1
 
     [ -f "$dir/$binary_file" ] || return 1
     [ -x "$dir/$binary_file" ] || return 1
@@ -420,12 +329,12 @@ done
 # Prerequisites
 # ----------------------------------------------------------------------
 
-command -v jq >/dev/null 2>&1 || fail "jq is required"
-command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
-command -v stat >/dev/null 2>&1 || fail "stat is required"
+command -v jq >/dev/null 2>&1 || kb_fail "jq is required"
+command -v sha256sum >/dev/null 2>&1 || kb_fail "sha256sum is required"
+command -v stat >/dev/null 2>&1 || kb_fail "stat is required"
 
 [ -x "$CONFIG_VALIDATOR" ] || \
-    fail "configuration validator not found: $CONFIG_VALIDATOR"
+    kb_fail "configuration validator not found: $CONFIG_VALIDATOR"
 
 
 # ----------------------------------------------------------------------
@@ -443,12 +352,12 @@ command -v stat >/dev/null 2>&1 || fail "stat is required"
 # ----------------------------------------------------------------------
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    fail "invalid workspace name: $WORKSPACE_NAME"
+    kb_fail "invalid workspace name: $WORKSPACE_NAME"
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail "workspace root not found: $WORKSPACE_ROOT"
+    kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -464,17 +373,17 @@ TOOLS_DIR="$WORKSPACE_DIR/tools"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
-    fail "workspace configuration not found: $WORKSPACE_FILE"
+    kb_fail "workspace configuration not found: $WORKSPACE_FILE"
 
 [ -d "$CLUSTERS_DIR" ] || \
-    fail "cluster directory not found: $CLUSTERS_DIR"
+    kb_fail "cluster directory not found: $CLUSTERS_DIR"
 
 [ -d "$TOOLS_DIR" ] || \
-    fail "tools directory not found: $TOOLS_DIR"
+    kb_fail "tools directory not found: $TOOLS_DIR"
 
 
 HOST_PLATFORM="$(
-    detect_host_platform
+    kb_detect_host_platform
 )"
 
 
@@ -495,7 +404,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -508,27 +417,11 @@ CONFIG_DIR="$(
 # Discover cluster documents
 # ----------------------------------------------------------------------
 
-mapfile -d '' -t CONFIG_FILES < <(
-    find "$CONFIG_DIR" \
-        -maxdepth 1 \
-        \( -type f -o -type l \) \
-        -name '*.json' \
-        -print0 |
-    sort -z
+mapfile -d '' -t CLUSTER_FILES < <(
+    kb_config_cluster_files \
+        "$CONFIG_DIR" \
+        "$CLUSTER_SCHEMA"
 )
-
-
-for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
-
-    CONFIG_SCHEMA="$(
-        jq -r '.schema' "$CONFIG_FILE"
-    )"
-
-    if [ "$CONFIG_SCHEMA" = "$CLUSTER_SCHEMA" ]; then
-        CLUSTER_FILES+=("$CONFIG_FILE")
-    fi
-
-done
 
 
 # ----------------------------------------------------------------------
@@ -680,7 +573,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         fi
 
 
-        if ! safe_relative_path "$KUBECONFIG_REL"; then
+        if ! kb_safe_relative_path "$KUBECONFIG_REL"; then
 
             record_error \
                 "cluster '$CLUSTER_NAME' user '$USER_NAME': unsafe kubeconfig path '$KUBECONFIG_REL'"
@@ -714,15 +607,32 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         fi
 
 
+        if [ ! -r "$KUBECONFIG_FILE" ]; then
+
+            echo "    kubeconfig   : UNREADABLE"
+            echo "    expected     : $KUBECONFIG_FILE"
+
+            record_error \
+                "cluster '$CLUSTER_NAME' user '$USER_NAME': kubeconfig is not readable by the current user"
+
+            INVALID=$((INVALID + 1))
+
+            echo "    status       : NOT READY"
+
+            continue
+
+        fi
+
+
         KUBECONFIG_MODE="$(
-            file_mode "$KUBECONFIG_FILE"
+            kb_file_mode "$KUBECONFIG_FILE"
         )"
 
         echo "    kubeconfig   : $KUBECONFIG_FILE"
         echo "    mode         : $KUBECONFIG_MODE"
 
 
-        if ! file_permissions_are_private "$KUBECONFIG_FILE"; then
+        if ! kb_file_permissions_are_private "$KUBECONFIG_FILE"; then
 
             record_error \
                 "cluster '$CLUSTER_NAME' user '$USER_NAME': kubeconfig permissions are too broad ($KUBECONFIG_MODE)"
@@ -830,22 +740,14 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         # Context selection
         # --------------------------------------------------------------
 
-        CURRENT_CONTEXT="$(
-            jq -r '."current-context" // ""' <<< "$KUBECONFIG_JSON"
-        )"
+        kb_profile_select_context \
+            "$CLUSTER_FILE" \
+            "$USER_NAME" \
+            "$KUBECONFIG_JSON"
 
-
-        if [ -n "$DECLARED_CONTEXT" ]; then
-
-            SELECTED_CONTEXT="$DECLARED_CONTEXT"
-            CONTEXT_SELECTION="KubeBase user.context"
-
-        else
-
-            SELECTED_CONTEXT="$CURRENT_CONTEXT"
-            CONTEXT_SELECTION="kubeconfig current-context"
-
-        fi
+        SELECTED_CONTEXT="$KB_PROFILE_SELECTED_CONTEXT"
+        CONTEXT_SELECTION="$KB_PROFILE_CONTEXT_SELECTION"
+        CURRENT_CONTEXT="$KB_PROFILE_CURRENT_CONTEXT"
 
 
         if [ -z "$SELECTED_CONTEXT" ]; then
@@ -863,16 +765,11 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
 
         SELECTED_CONTEXT_COUNT="$(
-            jq -r \
-                --arg context "$SELECTED_CONTEXT" '
-                [
-                    .contexts[]
-                    |
-                    select(.name == $context)
-                ]
-                | length
-            ' <<< "$KUBECONFIG_JSON"
+            kb_profile_context_count \
+                "$KUBECONFIG_JSON" \
+                "$SELECTED_CONTEXT"
         )"
+
 
 
         if [ "$SELECTED_CONTEXT_COUNT" -ne 1 ]; then
@@ -1236,13 +1133,13 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                     then
 
                         REF_MODE="$(
-                            file_mode "$RESOLVED_REF"
+                            kb_file_mode "$RESOLVED_REF"
                         )"
 
                         echo "        mode     : $REF_MODE"
 
 
-                        if ! file_permissions_are_private "$RESOLVED_REF"; then
+                        if ! kb_file_permissions_are_private "$RESOLVED_REF"; then
 
                             record_error \
                                 "cluster '$CLUSTER_NAME' user '$USER_NAME': $REF_KIND permissions are too broad ($REF_MODE)"

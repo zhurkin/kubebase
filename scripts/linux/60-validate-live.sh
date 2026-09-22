@@ -47,6 +47,11 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/workspace.sh"
+source "$LIB_DIR/namespace-inventory.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -77,13 +82,6 @@ TEMP_DIR=""
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
 
 record_warning()
 {
@@ -143,183 +141,6 @@ EOF_USAGE
 }
 
 
-detect_host_platform()
-{
-    local os_name
-    local arch_name
-
-    case "$(uname -s)" in
-        Linux)
-            os_name="linux"
-            ;;
-        *)
-            fail "unsupported host operating system: $(uname -s)"
-            ;;
-    esac
-
-    case "$(uname -m)" in
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-        *)
-            fail "unsupported host architecture: $(uname -m)"
-            ;;
-    esac
-
-    printf '%s-%s\n' "$os_name" "$arch_name"
-}
-
-
-namespace_name_is_valid()
-{
-    local value="$1"
-
-    [ "${#value}" -le 63 ] || return 1
-    [[ "$value" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]
-}
-
-
-first_nonempty_line()
-{
-    awk 'NF { print; exit }' "$1"
-}
-
-
-group_id_from_namespace_json()
-{
-    jq -r '
-        (
-            .metadata.labels["field.cattle.io/projectId"]
-            // ""
-        ) as $label
-        |
-        (
-            .metadata.annotations["field.cattle.io/projectId"]
-            // ""
-        ) as $annotation
-        |
-        if $label != "" then
-            $label
-        elif $annotation != "" then
-            ($annotation | split(":") | last)
-        else
-            ""
-        end
-    '
-}
-
-
-entries_from_namespace_list()
-{
-    jq -c '
-        [
-            .items[]
-            |
-            {
-                name: .metadata.name,
-                groupId: (
-                    .metadata.labels["field.cattle.io/projectId"]
-                    //
-                    (
-                        .metadata.annotations["field.cattle.io/projectId"]
-                        // ""
-                        |
-                        if . == "" then null else (split(":") | last) end
-                    )
-                )
-            }
-        ]
-    '
-}
-
-
-normalized_inventory()
-{
-    local cluster="$1"
-    local user="$2"
-    local context="$3"
-    local method="$4"
-    local complete="$5"
-    local entries_json="$6"
-    local timestamp="$7"
-
-    jq -n \
-        --arg schema "$INVENTORY_SCHEMA" \
-        --argjson schemaVersion "$INVENTORY_SCHEMA_VERSION" \
-        --arg cluster "$cluster" \
-        --arg user "$user" \
-        --arg context "$context" \
-        --arg method "$method" \
-        --argjson complete "$complete" \
-        --arg discoveredAt "$timestamp" \
-        --argjson entries "$entries_json" '
-        {
-            schema: $schema,
-            schemaVersion: $schemaVersion,
-            profile: {
-                cluster: $cluster,
-                user: $user,
-                context: $context
-            },
-            discoveredAt: $discoveredAt,
-            method: $method,
-            complete: $complete,
-            entries: (
-                $entries
-                | unique_by(.name)
-                | sort_by(.name)
-            )
-        }
-    '
-}
-
-
-write_inventory_cache()
-{
-    local workspace="$1"
-    local cluster="$2"
-    local user="$3"
-    local inventory="$4"
-
-    local state_root="$workspace/.kubebase"
-    local cache_root="$state_root/cache"
-    local namespace_root="$cache_root/namespaces"
-    local cache_dir="$namespace_root/$cluster"
-    local cache_file="$cache_dir/$user.json"
-    local temp="$cache_file.tmp.$$"
-    local path
-
-    umask 077
-
-    [ ! -L "$state_root" ] || \
-        fail "internal KubeBase state must not be a symlink: $state_root"
-
-    for path in "$state_root" "$cache_root" "$namespace_root" "$cache_dir"; do
-        [ ! -L "$path" ] || \
-            fail "KubeBase cache path must not be a symlink: $path"
-
-        if [ -e "$path" ] && [ ! -d "$path" ]; then
-            fail "KubeBase cache path is not a directory: $path"
-        fi
-
-        if [ ! -d "$path" ]; then
-            mkdir -- "$path"
-        fi
-
-        chmod 700 "$path"
-    done
-
-    printf '%s\n' "$inventory" > "$temp"
-    chmod 600 "$temp"
-    mv -f -- "$temp" "$cache_file"
-
-    printf '%s\n' "$cache_file"
-}
-
-
 discover_namespace_inventory()
 {
     local kubectl_bin="$1"
@@ -327,190 +148,35 @@ discover_namespace_inventory()
     local context="$3"
     local cluster="$4"
     local user="$5"
+    local status=0
 
-    local namespace_json
-    local list_error_file="$TEMP_DIR/list-error.$$"
-    local review_text
-    local review_error_file="$TEMP_DIR/review-error.$$"
-    local request_namespace
-    local candidate
-    local candidate_json
-    local candidate_error_file
-    local group_id
-    local entries_file="$TEMP_DIR/entries.$$"
-    local entries_json
-    local timestamp
-    local -a candidates=()
-
-    DISCOVERY_JSON=""
-    DISCOVERY_METHOD=""
-    DISCOVERY_COMPLETE="false"
-    DISCOVERY_NOTE=""
-    DISCOVERY_ERROR=""
-    DISCOVERY_API_READY="false"
-    DISCOVERY_LIST_ERROR=""
-    DISCOVERY_NAMES_FOUND=0
-    DISCOVERY_NAMES_VERIFIED=0
-
-    : > "$list_error_file"
-
-    if namespace_json="$(
+    kb_namespace_discover_live \
         "$kubectl_bin" \
-            --kubeconfig "$kubeconfig" \
-            --context "$context" \
-            --request-timeout="$REQUEST_TIMEOUT" \
-            get namespaces \
-            -o json \
-            2>"$list_error_file"
-    )"
-    then
-        entries_json="$(entries_from_namespace_list <<< "$namespace_json")"
-        timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        "$kubeconfig" \
+        "$context" \
+        "$cluster" \
+        "$user" \
+        "$REQUEST_TIMEOUT" \
+        "$TEMP_DIR" || status=$?
 
-        DISCOVERY_JSON="$(
-            normalized_inventory \
-                "$cluster" \
-                "$user" \
-                "$context" \
-                "namespace-list" \
-                true \
-                "$entries_json" \
-                "$timestamp"
-        )"
-        DISCOVERY_METHOD="namespace-list"
-        DISCOVERY_COMPLETE="true"
-        DISCOVERY_API_READY="true"
-        DISCOVERY_NAMES_FOUND="$(jq 'length' <<< "$entries_json")"
-        DISCOVERY_NAMES_VERIFIED="$DISCOVERY_NAMES_FOUND"
-        return 0
-    fi
+    DISCOVERY_JSON="$KB_NAMESPACE_DISCOVERY_JSON"
+    DISCOVERY_METHOD="$KB_NAMESPACE_DISCOVERY_METHOD"
+    DISCOVERY_COMPLETE="$KB_NAMESPACE_DISCOVERY_COMPLETE"
+    DISCOVERY_NOTE="$KB_NAMESPACE_DISCOVERY_NOTE"
+    DISCOVERY_ERROR="$KB_NAMESPACE_DISCOVERY_ERROR"
+    DISCOVERY_API_READY="$KB_NAMESPACE_DISCOVERY_API_READY"
+    DISCOVERY_LIST_ERROR="$KB_NAMESPACE_DISCOVERY_LIST_ERROR"
+    DISCOVERY_NAMES_FOUND="$KB_NAMESPACE_DISCOVERY_NAMES_FOUND"
+    DISCOVERY_NAMES_VERIFIED="$KB_NAMESPACE_DISCOVERY_NAMES_VERIFIED"
 
-    DISCOVERY_LIST_ERROR="$(first_nonempty_line "$list_error_file")"
+    return "$status"
+}
 
-    # A Forbidden response from the API is still positive evidence that the
-    # endpoint is reachable and the presented identity was authenticated.
-    # It must not be treated as an API/authentication failure.
-    case "$DISCOVERY_LIST_ERROR" in
-        *Forbidden*|*forbidden*)
-            DISCOVERY_API_READY="true"
-            ;;
-    esac
 
-    request_namespace="$(
-        "$kubectl_bin" \
-            --kubeconfig "$kubeconfig" \
-            config view \
-            -o json 2>/dev/null |
-        jq -r \
-            --arg context "$context" '
-            [
-                .contexts[]
-                | select(.name == $context)
-                | .context.namespace // ""
-            ][0] // ""
-        ' 2>/dev/null || true
-    )"
-
-    if [ -z "$request_namespace" ]; then
-        request_namespace="default"
-    fi
-
-    : > "$review_error_file"
-
-    if ! review_text="$(
-        "$kubectl_bin" \
-            --kubeconfig "$kubeconfig" \
-            --context "$context" \
-            --request-timeout="$REQUEST_TIMEOUT" \
-            auth can-i \
-            --list \
-            --namespace "$request_namespace" \
-            2>"$review_error_file"
-    )"
-    then
-        DISCOVERY_ERROR="namespace list: $(first_nonempty_line "$list_error_file"); rules review: $(first_nonempty_line "$review_error_file")"
-        return 1
-    fi
-
-    mapfile -t candidates < <(
-        awk -F '[[:space:]][[:space:]]+' '
-            $1 == "namespaces" && $3 ~ /^\[[^]]*\]$/ {
-                names = $3
-                sub(/^\[/, "", names)
-                sub(/\]$/, "", names)
-
-                count = split(names, parts, /[[:space:]]+/)
-                for (i = 1; i <= count; i++) {
-                    if (parts[i] != "" && parts[i] != "*") {
-                        print parts[i]
-                    }
-                }
-            }
-        ' <<< "$review_text" |
-        sort -u
-    )
-
-    : > "$entries_file"
-
-    for candidate in "${candidates[@]}"; do
-        [ -n "$candidate" ] || continue
-        namespace_name_is_valid "$candidate" || continue
-
-        DISCOVERY_NAMES_FOUND=$((DISCOVERY_NAMES_FOUND + 1))
-        candidate_error_file="$TEMP_DIR/candidate-error.$$.${RANDOM}"
-
-        if candidate_json="$(
-            "$kubectl_bin" \
-                --kubeconfig "$kubeconfig" \
-                --context "$context" \
-                --request-timeout="$REQUEST_TIMEOUT" \
-                get namespace "$candidate" \
-                -o json \
-                2>"$candidate_error_file"
-        )"
-        then
-            group_id="$(group_id_from_namespace_json <<< "$candidate_json")"
-
-            jq -cn \
-                --arg name "$candidate" \
-                --arg groupId "$group_id" '
-                {
-                    name: $name,
-                    groupId: (
-                        if $groupId == "" then null else $groupId end
-                    )
-                }
-            ' >> "$entries_file"
-            DISCOVERY_NAMES_VERIFIED=$((DISCOVERY_NAMES_VERIFIED + 1))
-        fi
-
-        rm -f -- "$candidate_error_file"
-    done
-
-    entries_json="$(jq -s '.' "$entries_file")"
-    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-    DISCOVERY_JSON="$(
-        normalized_inventory \
-            "$cluster" \
-            "$user" \
-            "$context" \
-            "auth-can-i" \
-            false \
-            "$entries_json" \
-            "$timestamp"
-    )"
-    DISCOVERY_METHOD="auth-can-i"
-    DISCOVERY_COMPLETE="false"
-    case "$DISCOVERY_LIST_ERROR" in
-        *Forbidden*|*forbidden*)
-            DISCOVERY_NOTE="cluster-wide namespace LIST is forbidden"
-            ;;
-        *)
-            DISCOVERY_NOTE="cluster-wide namespace LIST did not succeed"
-            ;;
-    esac
-    return 0
+write_inventory_cache()
+{
+    kb_namespace_cache_v2_write "$@"
+    printf '%s\n' "$KB_NAMESPACE_CACHE_FILE"
 }
 
 
@@ -521,17 +187,17 @@ discover_namespace_inventory()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --workspace-name)
-            [ "$#" -ge 2 ] || fail "--workspace-name requires a value"
+            [ "$#" -ge 2 ] || kb_fail "--workspace-name requires a value"
             WORKSPACE_NAME="$2"
             shift 2
             ;;
         --workspace-root)
-            [ "$#" -ge 2 ] || fail "--workspace-root requires a value"
+            [ "$#" -ge 2 ] || kb_fail "--workspace-root requires a value"
             WORKSPACE_ROOT="$2"
             shift 2
             ;;
         --request-timeout)
-            [ "$#" -ge 2 ] || fail "--request-timeout requires a value"
+            [ "$#" -ge 2 ] || kb_fail "--request-timeout requires a value"
             REQUEST_TIMEOUT="$2"
             shift 2
             ;;
@@ -553,10 +219,10 @@ done
 # Preconditions
 # ----------------------------------------------------------------------
 
-command -v jq >/dev/null 2>&1 || fail "jq is required"
+command -v jq >/dev/null 2>&1 || kb_fail "jq is required"
 
-[ -x "$CONFIG_VALIDATOR" ] || fail "configuration validator not found: $CONFIG_VALIDATOR"
-[ -x "$USER_VALIDATOR" ] || fail "user validator not found: $USER_VALIDATOR"
+[ -x "$CONFIG_VALIDATOR" ] || kb_fail "configuration validator not found: $CONFIG_VALIDATOR"
+[ -x "$USER_VALIDATOR" ] || kb_fail "user validator not found: $USER_VALIDATOR"
 
 "$CONFIG_VALIDATOR" \
     --workspace-name "$WORKSPACE_NAME" \
@@ -568,7 +234,7 @@ if ! "$USER_VALIDATOR" \
     --workspace-root "$WORKSPACE_ROOT" \
     >/dev/null
 then
-    fail "local user validation failed; run 'kubebase validate-users' for details"
+    kb_fail "local user validation failed; run 'kubebase validate-users' for details"
 fi
 
 
@@ -577,18 +243,18 @@ fi
 # ----------------------------------------------------------------------
 
 [[ "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
-    fail "invalid workspace name: $WORKSPACE_NAME"
+    kb_fail "invalid workspace name: $WORKSPACE_NAME"
 
-[ -d "$WORKSPACE_ROOT" ] || fail "workspace root not found: $WORKSPACE_ROOT"
+[ -d "$WORKSPACE_ROOT" ] || kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 WORKSPACE_ROOT="$(cd -- "$WORKSPACE_ROOT" && pwd -P)"
 WORKSPACE_DIR="$WORKSPACE_ROOT/$WORKSPACE_NAME"
 WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 CLUSTERS_DIR="$WORKSPACE_DIR/clusters"
-HOST_PLATFORM="$(detect_host_platform)"
+HOST_PLATFORM="$(kb_detect_host_platform)"
 
-[ -f "$WORKSPACE_FILE" ] || fail "workspace configuration not found: $WORKSPACE_FILE"
-[ -d "$CLUSTERS_DIR" ] || fail "clusters directory not found: $CLUSTERS_DIR"
+[ -f "$WORKSPACE_FILE" ] || kb_fail "workspace configuration not found: $WORKSPACE_FILE"
+[ -d "$CLUSTERS_DIR" ] || kb_fail "clusters directory not found: $CLUSTERS_DIR"
 
 CONFIG_PATH="$(jq -r '.configuration.path' "$WORKSPACE_FILE")"
 
@@ -598,32 +264,17 @@ else
     CONFIG_DIR_CANDIDATE="$WORKSPACE_DIR/$CONFIG_PATH"
 fi
 
-[ -d "$CONFIG_DIR_CANDIDATE" ] || fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+[ -d "$CONFIG_DIR_CANDIDATE" ] || kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 CONFIG_DIR="$(cd -- "$CONFIG_DIR_CANDIDATE" && pwd -P)"
 
 TEMP_DIR="$(mktemp -d)"
 
-mapfile -d '' -t CONFIG_FILES < <(
-    find "$CONFIG_DIR" \
-        -maxdepth 1 \
-        \( -type f -o -type l \) \
-        -name '*.json' \
-        -print0 |
-    sort -z
+mapfile -d '' -t CLUSTER_FILES < <(
+    kb_config_cluster_files \
+        "$CONFIG_DIR" \
+        "$CLUSTER_SCHEMA" \
+        "$CLUSTER_SCHEMA_VERSION"
 )
-
-CLUSTER_FILES=()
-
-for config_file in "${CONFIG_FILES[@]}"; do
-    if jq -e \
-        --arg schema "$CLUSTER_SCHEMA" \
-        --argjson version "$CLUSTER_SCHEMA_VERSION" '
-        .schema == $schema and .schemaVersion == $version
-    ' "$config_file" >/dev/null 2>&1
-    then
-        CLUSTER_FILES+=("$config_file")
-    fi
-done
 
 
 echo "$PROJECT_NAME live profile validation"

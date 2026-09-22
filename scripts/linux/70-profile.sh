@@ -40,6 +40,12 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/toolchain.sh"
+source "$LIB_DIR/workspace.sh"
+source "$LIB_DIR/profile.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -91,13 +97,6 @@ PROFILE_KUBECTL=""
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
 usage()
 {
     cat <<EOF_USAGE
@@ -130,127 +129,10 @@ EOF_USAGE
 }
 
 
-safe_name()
-{
-    local value="$1"
-
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
-}
-
-
-safe_relative_path()
-{
-    local value="$1"
-    local part
-    local -a parts
-
-    [ -n "$value" ] || return 1
-    [[ "$value" != /* ]] || return 1
-
-    case "$value" in
-        *$'\n'*|*$'\r'*|*$'\t'*)
-            return 1
-            ;;
-    esac
-
-    IFS='/' read -r -a parts <<< "$value"
-
-    for part in "${parts[@]}"; do
-        [ -n "$part" ] || return 1
-        [ "$part" != "." ] || return 1
-        [ "$part" != ".." ] || return 1
-    done
-
-    return 0
-}
-
-
-file_permissions_are_private()
-{
-    local path="$1"
-    local mode
-    local mode_value
-
-    mode="$(stat -Lc '%a' "$path")"
-
-    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-
-    mode_value=$((8#$mode))
-
-    (( (mode_value & 077) == 0 ))
-}
-
-
-detect_host_platform()
-{
-    local os_name
-    local arch_name
-
-    case "$(uname -s)" in
-        Linux)
-            os_name="linux"
-            ;;
-
-        *)
-            fail "unsupported host operating system for Linux profile manager: $(uname -s)"
-            ;;
-    esac
-
-    case "$(uname -m)" in
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-
-        *)
-            fail "unsupported host architecture: $(uname -m)"
-            ;;
-    esac
-
-    printf '%s-%s\n' "$os_name" "$arch_name"
-}
-
-
-command_name_for_tool()
-{
-    local tool="$1"
-
-    case "$tool" in
-        krew)
-            printf 'kubectl-krew\n'
-            ;;
-
-        *)
-            printf '%s\n' "$tool"
-            ;;
-    esac
-}
-
-
 set_profile_error()
 {
     PROFILE_ERROR="$1"
     return 1
-}
-
-
-shell_export()
-{
-    local name="$1"
-    local value="$2"
-
-    printf 'export %s=%q\n' "$name" "$value"
-}
-
-
-shell_unset()
-{
-    local name="$1"
-
-    printf 'unset %s\n' "$name"
 }
 
 
@@ -317,19 +199,19 @@ parse_common_args()
 
 load_workspace()
 {
-    command -v jq >/dev/null 2>&1 || fail "jq is required"
-    command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
-    command -v stat >/dev/null 2>&1 || fail "stat is required"
-    command -v mktemp >/dev/null 2>&1 || fail "mktemp is required"
+    command -v jq >/dev/null 2>&1 || kb_fail "jq is required"
+    command -v sha256sum >/dev/null 2>&1 || kb_fail "sha256sum is required"
+    command -v stat >/dev/null 2>&1 || kb_fail "stat is required"
+    command -v mktemp >/dev/null 2>&1 || kb_fail "mktemp is required"
 
     [ -x "$CONFIG_VALIDATOR" ] || \
-        fail "configuration validator not found: $CONFIG_VALIDATOR"
+        kb_fail "configuration validator not found: $CONFIG_VALIDATOR"
 
-    safe_name "$WORKSPACE_NAME" || \
-        fail "invalid workspace name: $WORKSPACE_NAME"
+    kb_safe_name "$WORKSPACE_NAME" || \
+        kb_fail "invalid workspace name: $WORKSPACE_NAME"
 
     [ -d "$WORKSPACE_ROOT" ] || \
-        fail "workspace root not found: $WORKSPACE_ROOT"
+        kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
     WORKSPACE_ROOT="$(
         cd -- "$WORKSPACE_ROOT"
@@ -343,14 +225,15 @@ load_workspace()
     INTERNAL_DIR="$WORKSPACE_DIR/.kubebase"
     SESSIONS_DIR="$INTERNAL_DIR/sessions"
 
-    [ -f "$WORKSPACE_FILE" ] || \
-        fail "workspace configuration not found: $WORKSPACE_FILE"
+    kb_require_readable_file \
+        "$WORKSPACE_FILE" \
+        "workspace configuration"
 
     [ -d "$CLUSTERS_DIR" ] || \
-        fail "cluster directory not found: $CLUSTERS_DIR"
+        kb_fail "cluster directory not found: $CLUSTERS_DIR"
 
     [ -d "$TOOLS_DIR" ] || \
-        fail "tools directory not found: $TOOLS_DIR"
+        kb_fail "tools directory not found: $TOOLS_DIR"
 
     "$CONFIG_VALIDATOR" \
         --workspace-name "$WORKSPACE_NAME" \
@@ -366,75 +249,25 @@ load_workspace()
     fi
 
     [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-        fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+        kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
     CONFIG_DIR="$(
         cd -- "$CONFIG_DIR_CANDIDATE"
         pwd -P
     )"
 
-    HOST_PLATFORM="$(detect_host_platform)"
+    HOST_PLATFORM="$(kb_detect_host_platform "Linux profile manager")"
 
     CONFIG_FILES=()
     CLUSTER_FILES=()
 
-    mapfile -d '' -t CONFIG_FILES < <(
-        find "$CONFIG_DIR" \
-            -maxdepth 1 \
-            \( -type f -o -type l \) \
-            -name '*.json' \
-            -print0 |
-        sort -z
+    mapfile -d '' -t CLUSTER_FILES < <(
+        kb_config_cluster_files \
+            "$CONFIG_DIR" \
+            "$CLUSTER_SCHEMA" \
+            "$CLUSTER_SCHEMA_VERSION"
     )
 
-    for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
-        CONFIG_SCHEMA="$(jq -r '.schema' "$CONFIG_FILE")"
-
-        if [ "$CONFIG_SCHEMA" = "$CLUSTER_SCHEMA" ]; then
-            CLUSTER_FILES+=("$CONFIG_FILE")
-        fi
-    done
-}
-
-
-find_cluster_file()
-{
-    local cluster_name="$1"
-    local file
-    local found=""
-
-    for file in "${CLUSTER_FILES[@]}"; do
-        if [ "$(jq -r '.name' "$file")" = "$cluster_name" ]; then
-            if [ -n "$found" ]; then
-                return 1
-            fi
-
-            found="$file"
-        fi
-    done
-
-    [ -n "$found" ] || return 1
-
-    printf '%s\n' "$found"
-}
-
-
-configured_profile_selectors()
-{
-    local cluster_file
-    local cluster_name
-    local user_name
-
-    for cluster_file in "${CLUSTER_FILES[@]}"; do
-        cluster_name="$(jq -r '.name' "$cluster_file")"
-
-        while IFS= read -r user_name; do
-            [ -n "$user_name" ] || continue
-            printf '%s/%s\n' "$cluster_name" "$user_name"
-        done < <(
-            jq -r '.users | keys[]' "$cluster_file"
-        )
-    done
 }
 
 
@@ -503,14 +336,14 @@ resolve_profile()
     esac
 
     if [[ "$user_name" == */* ]] || \
-       ! safe_name "$cluster_name" || \
-       ! safe_name "$user_name"
+       ! kb_safe_name "$cluster_name" || \
+       ! kb_safe_name "$user_name"
     then
         set_profile_error "invalid profile selector: $selector"
         return 1
     fi
 
-    if ! cluster_file="$(find_cluster_file "$cluster_name")"; then
+    if ! cluster_file="$(kb_find_cluster_file "$cluster_name" "${CLUSTER_FILES[@]}")"; then
         set_profile_error "unknown cluster '$cluster_name'"
         return 1
     fi
@@ -556,6 +389,11 @@ resolve_profile()
         return 1
     }
 
+    [ -r "$PROFILE_TOOLCHAIN_MANIFEST" ] || {
+        set_profile_error "cluster '$cluster_name' toolchain manifest is not readable"
+        return 1
+    }
+
     if ! jq -e \
         --arg schema "$TOOLCHAIN_SCHEMA" \
         --argjson schemaVersion "$TOOLCHAIN_SCHEMA_VERSION" \
@@ -587,7 +425,7 @@ resolve_profile()
     while IFS=$'\t' read -r tool_name tool_version; do
         [ -n "$tool_name" ] || continue
 
-        command_name="$(command_name_for_tool "$tool_name")"
+        command_name="$(kb_tool_command_name "$tool_name")"
         command_path="$PROFILE_TOOLCHAIN_BIN/$command_name"
 
         if ! jq -e \
@@ -684,7 +522,7 @@ resolve_profile()
         ' "$cluster_file"
     )"
 
-    if ! safe_relative_path "$kubeconfig_rel"; then
+    if ! kb_safe_relative_path "$kubeconfig_rel"; then
         set_profile_error "cluster '$cluster_name' user '$user_name' has an unsafe kubeconfig path"
         return 1
     fi
@@ -696,7 +534,12 @@ resolve_profile()
         return 1
     }
 
-    if ! file_permissions_are_private "$PROFILE_SOURCE_KUBECONFIG"; then
+    [ -r "$PROFILE_SOURCE_KUBECONFIG" ] || {
+        set_profile_error "cluster '$cluster_name' user '$user_name' kubeconfig is not readable"
+        return 1
+    }
+
+    if ! kb_file_permissions_are_private "$PROFILE_SOURCE_KUBECONFIG"; then
         set_profile_error "cluster '$cluster_name' user '$user_name' kubeconfig permissions are too broad"
         return 1
     fi
@@ -730,22 +573,15 @@ resolve_profile()
         return 1
     fi
 
-    current_context="$(jq -r '."current-context" // ""' <<< "$kubeconfig_json")"
+    kb_profile_select_context \
+        "$cluster_file" \
+        "$user_name" \
+        "$kubeconfig_json"
 
-    declared_context="$(
-        jq -r \
-            --arg user "$user_name" '
-            .users[$user].context // ""
-        ' "$cluster_file"
-    )"
+    PROFILE_CONTEXT="$KB_PROFILE_SELECTED_CONTEXT"
+    PROFILE_CONTEXT_SELECTION="$KB_PROFILE_CONTEXT_SELECTION"
+    current_context="$KB_PROFILE_CURRENT_CONTEXT"
 
-    if [ -n "$declared_context" ]; then
-        PROFILE_CONTEXT="$declared_context"
-        PROFILE_CONTEXT_SELECTION="KubeBase user.context"
-    else
-        PROFILE_CONTEXT="$current_context"
-        PROFILE_CONTEXT_SELECTION="kubeconfig current-context"
-    fi
 
     [ -n "$PROFILE_CONTEXT" ] || {
         set_profile_error "cluster '$cluster_name' user '$user_name' has no selected context"
@@ -753,15 +589,11 @@ resolve_profile()
     }
 
     selected_context_count="$(
-        jq -r \
-            --arg context "$PROFILE_CONTEXT" '
-            [
-                .contexts[]
-                | select(.name == $context)
-            ]
-            | length
-        ' <<< "$kubeconfig_json"
+        kb_profile_context_count \
+            "$kubeconfig_json" \
+            "$PROFILE_CONTEXT"
     )"
+
 
     if [ "$selected_context_count" -ne 1 ]; then
         set_profile_error "cluster '$cluster_name' user '$user_name' selected context '$PROFILE_CONTEXT' does not exist exactly once"
@@ -769,31 +601,25 @@ resolve_profile()
     fi
 
     context_cluster="$(
-        jq -r \
-            --arg context "$PROFILE_CONTEXT" '
-            .contexts[]
-            | select(.name == $context)
-            | .context.cluster // ""
-        ' <<< "$kubeconfig_json"
+        kb_profile_context_cluster \
+            "$kubeconfig_json" \
+            "$PROFILE_CONTEXT"
     )"
+
 
     context_user="$(
-        jq -r \
-            --arg context "$PROFILE_CONTEXT" '
-            .contexts[]
-            | select(.name == $context)
-            | .context.user // ""
-        ' <<< "$kubeconfig_json"
+        kb_profile_context_user \
+            "$kubeconfig_json" \
+            "$PROFILE_CONTEXT"
     )"
 
+
     PROFILE_CONTEXT_NAMESPACE="$(
-        jq -r \
-            --arg context "$PROFILE_CONTEXT" '
-            .contexts[]
-            | select(.name == $context)
-            | .context.namespace // ""
-        ' <<< "$kubeconfig_json"
+        kb_profile_context_namespace \
+            "$kubeconfig_json" \
+            "$PROFILE_CONTEXT"
     )"
+
 
     [ -n "$context_cluster" ] || {
         set_profile_error "cluster '$cluster_name' user '$user_name' selected context has no cluster"
@@ -856,11 +682,11 @@ ensure_session_root()
     umask 077
 
     if [ -L "$INTERNAL_DIR" ]; then
-        fail "internal KubeBase state must not be a symlink: $INTERNAL_DIR"
+        kb_fail "internal KubeBase state must not be a symlink: $INTERNAL_DIR"
     fi
 
     if [ -e "$INTERNAL_DIR" ] && [ ! -d "$INTERNAL_DIR" ]; then
-        fail "internal KubeBase state is not a directory: $INTERNAL_DIR"
+        kb_fail "internal KubeBase state is not a directory: $INTERNAL_DIR"
     fi
 
     if [ ! -d "$INTERNAL_DIR" ]; then
@@ -870,11 +696,11 @@ ensure_session_root()
     chmod 700 "$INTERNAL_DIR"
 
     if [ -L "$SESSIONS_DIR" ]; then
-        fail "KubeBase sessions path must not be a symlink: $SESSIONS_DIR"
+        kb_fail "KubeBase sessions path must not be a symlink: $SESSIONS_DIR"
     fi
 
     if [ -e "$SESSIONS_DIR" ] && [ ! -d "$SESSIONS_DIR" ]; then
-        fail "KubeBase sessions path is not a directory: $SESSIONS_DIR"
+        kb_fail "KubeBase sessions path is not a directory: $SESSIONS_DIR"
     fi
 
     if [ ! -d "$SESSIONS_DIR" ]; then
@@ -1005,10 +831,10 @@ cleanup_profile_session()
     fi
 
     [ ! -L "$session_dir" ] || \
-        fail "refusing to remove symlink as KubeBase session: $session_dir"
+        kb_fail "refusing to remove symlink as KubeBase session: $session_dir"
 
     [ -d "$session_dir" ] || \
-        fail "KubeBase session is not a directory: $session_dir"
+        kb_fail "KubeBase session is not a directory: $session_dir"
 
     ensure_session_root
 
@@ -1020,7 +846,7 @@ cleanup_profile_session()
             ;;
 
         *)
-            fail "refusing to remove unexpected KubeBase session path: $session_dir"
+            kb_fail "refusing to remove unexpected KubeBase session path: $session_dir"
             ;;
     esac
 
@@ -1035,12 +861,12 @@ cleanup_profile_session()
     )"
 
     [ "$parent_real" = "$sessions_real" ] || \
-        fail "refusing to remove session outside KubeBase session root: $session_dir"
+        kb_fail "refusing to remove session outside KubeBase session root: $session_dir"
 
     manifest="$session_dir/session.json"
 
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || \
-        fail "refusing to remove unrecognized KubeBase session: $session_dir"
+        kb_fail "refusing to remove unrecognized KubeBase session: $session_dir"
 
     jq -e \
         --arg schema "$SESSION_SCHEMA" \
@@ -1052,7 +878,7 @@ cleanup_profile_session()
         and
         .workspace == $workspace
     ' "$manifest" >/dev/null 2>&1 || \
-        fail "refusing to remove session with invalid metadata: $session_dir"
+        kb_fail "refusing to remove session with invalid metadata: $session_dir"
 
     rm -rf -- "$session_dir"
 }
@@ -1067,27 +893,29 @@ command_profiles()
     local selector
     local context
     local status
+
+    local profile_width
+    local context_width
+    local platform_width
+
+    local profile_sep
+    local context_sep
+    local platform_sep
+
+    local -a selectors=()
+    local -a contexts=()
+    local -a statuses=()
     local -a not_ready=()
 
     load_workspace
 
-    echo "$PROJECT_NAME profiles"
-    echo
-    echo "Workspace : $WORKSPACE_DIR"
-    echo "Platform  : $HOST_PLATFORM"
-    echo
+    profile_width=7
+    context_width=7
+    platform_width=8
 
-    printf '%-36s %-28s %-14s %s\n' \
-        "PROFILE" \
-        "CONTEXT" \
-        "PLATFORM" \
-        "STATUS"
-
-    printf '%-36s %-28s %-14s %s\n' \
-        "------------------------------------" \
-        "----------------------------" \
-        "--------------" \
-        "---------"
+    if [ "${#HOST_PLATFORM}" -gt "$platform_width" ]; then
+        platform_width="${#HOST_PLATFORM}"
+    fi
 
     while IFS= read -r selector; do
         [ -n "$selector" ] || continue
@@ -1101,13 +929,56 @@ command_profiles()
             not_ready+=("$selector: $PROFILE_ERROR")
         fi
 
-        printf '%-36s %-28s %-14s %s\n' \
-            "$selector" \
-            "$context" \
-            "$HOST_PLATFORM" \
-            "$status"
+        selectors+=("$selector")
+        contexts+=("$context")
+        statuses+=("$status")
 
-    done < <(configured_profile_selectors)
+        if [ "${#selector}" -gt "$profile_width" ]; then
+            profile_width="${#selector}"
+        fi
+
+        if [ "${#context}" -gt "$context_width" ]; then
+            context_width="${#context}"
+        fi
+
+    done < <(kb_configured_profile_selectors "${CLUSTER_FILES[@]}")
+
+    printf -v profile_sep '%*s' "$profile_width" ''
+    profile_sep="${profile_sep// /-}"
+
+    printf -v context_sep '%*s' "$context_width" ''
+    context_sep="${context_sep// /-}"
+
+    printf -v platform_sep '%*s' "$platform_width" ''
+    platform_sep="${platform_sep// /-}"
+
+    echo "$PROJECT_NAME profiles"
+    echo
+    echo "Workspace : $WORKSPACE_DIR"
+    echo "Platform  : $HOST_PLATFORM"
+    echo
+
+    printf '%-*s  %-*s  %-*s  %s\n' \
+        "$profile_width" "PROFILE" \
+        "$context_width" "CONTEXT" \
+        "$platform_width" "PLATFORM" \
+        "STATUS"
+
+    printf '%s  %s  %s  %s\n' \
+        "$profile_sep" \
+        "$context_sep" \
+        "$platform_sep" \
+        "---------"
+
+    local i
+
+    for ((i = 0; i < ${#selectors[@]}; i++)); do
+        printf '%-*s  %-*s  %-*s  %s\n' \
+            "$profile_width" "${selectors[$i]}" \
+            "$context_width" "${contexts[$i]}" \
+            "$platform_width" "$HOST_PLATFORM" \
+            "${statuses[$i]}"
+    done
 
     if [ "${#not_ready[@]}" -gt 0 ]; then
         echo
@@ -1118,7 +989,6 @@ command_profiles()
         done
     fi
 }
-
 
 command_select_profile()
 {
@@ -1135,7 +1005,7 @@ command_select_profile()
         if resolve_profile "$selector"; then
             ready_profiles+=("$selector")
         fi
-    done < <(configured_profile_selectors)
+    done < <(kb_configured_profile_selectors "${CLUSTER_FILES[@]}")
 
     if [ "${#ready_profiles[@]}" -eq 0 ]; then
         echo "ERROR: no ready KubeBase profiles are available" >&2
@@ -1191,35 +1061,30 @@ command_emit_use()
 
     create_profile_session
 
-    shell_export "KUBEBASE_ACTIVE" "1"
-    shell_export "KUBEBASE_WORKSPACE" "$WORKSPACE_DIR"
-    shell_export "KUBEBASE_CLUSTER" "$PROFILE_CLUSTER_NAME"
-    shell_export "KUBEBASE_USER" "$PROFILE_USER_NAME"
-    shell_export "KUBEBASE_CONTEXT" "$PROFILE_CONTEXT"
-    shell_export "KUBEBASE_CONTEXT_SELECTION" "$PROFILE_CONTEXT_SELECTION"
-    shell_export "KUBEBASE_PLATFORM" "$HOST_PLATFORM"
-    shell_export "KUBEBASE_TOOLCHAIN" "$PROFILE_TOOLCHAIN_DIR"
-    shell_export "KUBEBASE_TOOLCHAIN_BIN" "$PROFILE_TOOLCHAIN_BIN"
-    shell_export "KUBEBASE_SOURCE_KUBECONFIG" "$PROFILE_SOURCE_KUBECONFIG"
-    shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
-    shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
+    kb_shell_export "KUBEBASE_ACTIVE" "1"
+    kb_shell_export "KUBEBASE_WORKSPACE" "$WORKSPACE_DIR"
+    kb_shell_export "KUBEBASE_CLUSTER" "$PROFILE_CLUSTER_NAME"
+    kb_shell_export "KUBEBASE_USER" "$PROFILE_USER_NAME"
+    kb_shell_export "KUBEBASE_CONTEXT" "$PROFILE_CONTEXT"
+    kb_shell_export "KUBEBASE_CONTEXT_SELECTION" "$PROFILE_CONTEXT_SELECTION"
+    kb_shell_export "KUBEBASE_PLATFORM" "$HOST_PLATFORM"
+    kb_shell_export "KUBEBASE_TOOLCHAIN" "$PROFILE_TOOLCHAIN_DIR"
+    kb_shell_export "KUBEBASE_TOOLCHAIN_BIN" "$PROFILE_TOOLCHAIN_BIN"
+    kb_shell_export "KUBEBASE_SOURCE_KUBECONFIG" "$PROFILE_SOURCE_KUBECONFIG"
+    kb_shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
+    kb_shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
 
     # Navigation starts clean for every newly activated profile.
-    shell_unset "KUBEBASE_SCOPE"
-    shell_unset "KUBEBASE_GROUP"
-    shell_unset "KUBEBASE_NAMESPACE_GROUP"
-
-    # Compatibility cleanup for older Step 80 shells.
-    shell_unset "KUBEBASE_PROJECT"
-    shell_unset "KUBEBASE_NAMESPACE_PROJECT"
+    kb_shell_unset "KUBEBASE_GROUP"
+    kb_shell_unset "KUBEBASE_NAMESPACE_GROUP"
 
     if [ -n "$PROFILE_CONTEXT_NAMESPACE" ]; then
-        shell_export "KUBEBASE_NAMESPACE" "$PROFILE_CONTEXT_NAMESPACE"
+        kb_shell_export "KUBEBASE_NAMESPACE" "$PROFILE_CONTEXT_NAMESPACE"
     else
-        shell_unset "KUBEBASE_NAMESPACE"
+        kb_shell_unset "KUBEBASE_NAMESPACE"
     fi
 
-    shell_export "KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
+    kb_shell_export "KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
 }
 
 
@@ -1269,10 +1134,6 @@ command_current()
         echo "Group     : $KUBEBASE_GROUP (filter)"
     elif [ -n "${KUBEBASE_NAMESPACE_GROUP:-}" ]; then
         echo "Group     : $KUBEBASE_NAMESPACE_GROUP (namespace)"
-    elif [ -n "${KUBEBASE_PROJECT:-}" ]; then
-        echo "Group     : $KUBEBASE_PROJECT (legacy filter)"
-    elif [ -n "${KUBEBASE_NAMESPACE_PROJECT:-}" ]; then
-        echo "Group     : $KUBEBASE_NAMESPACE_PROJECT (legacy namespace)"
     else
         echo "Group     : (none)"
     fi
@@ -1328,13 +1189,13 @@ command_shell_init()
     local shell_name="$1"
 
     [ "$shell_name" = "bash" ] || \
-        fail "unsupported shell '$shell_name'; Step 70 currently supports bash only"
+        kb_fail "unsupported shell '$shell_name'; Step 70 currently supports bash only"
 
     load_workspace
 
-    shell_export "KUBEBASE_ENTRYPOINT" "$ENTRYPOINT"
-    shell_export "KUBEBASE_SHELL_WORKSPACE_NAME" "$WORKSPACE_NAME"
-    shell_export "KUBEBASE_SHELL_WORKSPACE_ROOT" "$WORKSPACE_ROOT"
+    kb_shell_export "KUBEBASE_ENTRYPOINT" "$ENTRYPOINT"
+    kb_shell_export "KUBEBASE_SHELL_WORKSPACE_NAME" "$WORKSPACE_NAME"
+    kb_shell_export "KUBEBASE_SHELL_WORKSPACE_ROOT" "$WORKSPACE_ROOT"
 
     cat <<'EOF_SHELL'
 
@@ -1461,7 +1322,7 @@ kubebase()
             "$KUBEBASE_ENTRYPOINT" current
             ;;
 
-        group|project)
+        group)
             shift || true
 
             if [ "$#" -gt 1 ]; then
@@ -1488,7 +1349,7 @@ kubebase()
             "$KUBEBASE_ENTRYPOINT" current
             ;;
 
-        namespaces|groups|projects)
+        namespaces|groups)
             "$KUBEBASE_ENTRYPOINT" "$@"
             ;;
 
@@ -1529,12 +1390,9 @@ kubebase()
             unset KUBEBASE_SOURCE_KUBECONFIG
             unset KUBEBASE_EFFECTIVE_KUBECONFIG
             unset KUBEBASE_SESSION_DIR
-            unset KUBEBASE_SCOPE
             unset KUBEBASE_GROUP
             unset KUBEBASE_NAMESPACE
             unset KUBEBASE_NAMESPACE_GROUP
-            unset KUBEBASE_PROJECT
-            unset KUBEBASE_NAMESPACE_PROJECT
 
             if [ -n "$__kb_old_session" ]; then
                 if ! "$KUBEBASE_ENTRYPOINT" \

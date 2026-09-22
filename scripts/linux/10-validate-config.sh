@@ -32,6 +32,9 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -52,7 +55,6 @@ WORKSPACE_ROOT="$DEFAULT_WORKSPACE_ROOT"
 QUIET=0
 
 VALIDATION_ERRORS=0
-VALIDATION_WARNINGS=0
 CONFIG_FILE_COUNT=0
 CLUSTER_COUNT=0
 
@@ -64,28 +66,12 @@ TOOL_SOURCE_FILES=()
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
 validation_error()
 {
     echo "ERROR: $*" >&2
     VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
 }
 
-
-validation_warning()
-{
-    if [ "$QUIET" -eq 0 ]; then
-        echo "WARNING: $*" >&2
-    fi
-
-    VALIDATION_WARNINGS=$((VALIDATION_WARNINGS + 1))
-}
 
 
 usage()
@@ -130,6 +116,43 @@ EOF
 }
 
 
+cluster_unsupported_fields()
+{
+    local file="$1"
+
+    jq -r '
+        [
+            (
+                (keys - ["name", "schema", "schemaVersion", "toolPlatforms", "tools", "users"])[]?
+            ),
+            (
+                if (.tools | type) == "object" then
+                    .tools
+                    | to_entries[]?
+                    | . as $tool
+                    | (($tool.value | keys) - ["version"])[]?
+                    | "tools.\($tool.key)." + .
+                else
+                    empty
+                end
+            ),
+            (
+                if (.users | type) == "object" then
+                    .users
+                    | to_entries[]?
+                    | . as $user
+                    | (($user.value | keys) - ["context", "kubeconfig"])[]?
+                    | "users.\($user.key)." + .
+                else
+                    empty
+                end
+            )
+        ]
+        | join(", ")
+    ' "$file"
+}
+
+
 validate_cluster_structure()
 {
     local file="$1"
@@ -149,6 +172,10 @@ validate_cluster_structure()
         .schema == $schema
         and
         .schemaVersion == $version
+
+        and
+
+        ((keys - ["name", "schema", "schemaVersion", "toolPlatforms", "tools", "users"]) | length == 0)
 
         and
 
@@ -177,6 +204,8 @@ validate_cluster_structure()
             and
             (.value | type) == "object"
             and
+            (((.value | keys) - ["version"]) | length == 0)
+            and
             (.value.version | nonempty_string)
         )
 
@@ -191,6 +220,8 @@ validate_cluster_structure()
             and
             (.value | type) == "object"
             and
+            (((.value | keys) - ["context", "kubeconfig"]) | length == 0)
+            and
             (.value.kubeconfig | nonempty_string)
 
             and
@@ -203,34 +234,6 @@ validate_cluster_structure()
         )
 
     ' "$file" >/dev/null 2>&1
-}
-
-
-warn_deprecated_cluster_fields()
-{
-    local file="$1"
-    local deprecated
-
-    deprecated="$(
-        jq -r '
-            [
-                (if has("environments") then "environments" else empty end),
-                (if has("accessProfiles") then "accessProfiles" else empty end),
-                (
-                    if any(.users[]?; (.access? | type) == "object")
-                    then "users.*.access"
-                    else empty
-                    end
-                )
-            ]
-            | join(", ")
-        ' "$file"
-    )"
-
-    if [ -n "$deprecated" ]; then
-        validation_warning \
-            "$file: deprecated cluster fields are ignored by KubeBase: $deprecated"
-    fi
 }
 
 
@@ -296,7 +299,7 @@ done
 # ----------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || \
-    fail "jq is required"
+    kb_fail "jq is required"
 
 
 # ----------------------------------------------------------------------
@@ -304,12 +307,12 @@ command -v jq >/dev/null 2>&1 || \
 # ----------------------------------------------------------------------
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    fail "invalid workspace name: $WORKSPACE_NAME"
+    kb_fail "invalid workspace name: $WORKSPACE_NAME"
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail "workspace root not found: $WORKSPACE_ROOT"
+    kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -322,15 +325,12 @@ WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 
 
 [ -d "$WORKSPACE_DIR" ] || \
-    fail "workspace not found: $WORKSPACE_DIR"
+    kb_fail "workspace not found: $WORKSPACE_DIR"
 
 
-[ -f "$WORKSPACE_FILE" ] || \
-    fail "workspace configuration not found: $WORKSPACE_FILE"
-
-
-jq empty "$WORKSPACE_FILE" >/dev/null 2>&1 || \
-    fail "invalid workspace JSON: $WORKSPACE_FILE"
+kb_require_readable_json_file \
+    "$WORKSPACE_FILE" \
+    "workspace configuration"
 
 
 if ! jq -e \
@@ -359,7 +359,7 @@ if ! jq -e \
 ' "$WORKSPACE_FILE" >/dev/null 2>&1
 then
 
-    fail \
+    kb_fail \
         "unsupported or invalid workspace configuration: $WORKSPACE_FILE"
 
 fi
@@ -388,7 +388,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -425,7 +425,17 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
     if [ ! -f "$CONFIG_FILE" ]; then
 
         validation_error \
-            "$CONFIG_FILE: configuration entry is not a readable regular file"
+            "$CONFIG_FILE: configuration entry is not a regular file"
+
+        continue
+
+    fi
+
+
+    if [ ! -r "$CONFIG_FILE" ]; then
+
+        validation_error \
+            "$CONFIG_FILE: configuration file is not readable"
 
         continue
 
@@ -508,6 +518,18 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
             fi
 
 
+            UNSUPPORTED_FIELDS="$(cluster_unsupported_fields "$CONFIG_FILE")"
+
+            if [ -n "$UNSUPPORTED_FIELDS" ]; then
+
+                validation_error \
+                    "$CONFIG_FILE: unsupported kubebase.cluster field(s): $UNSUPPORTED_FIELDS"
+
+                continue
+
+            fi
+
+
             if ! validate_cluster_structure "$CONFIG_FILE"; then
 
                 validation_error \
@@ -538,8 +560,6 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
             CLUSTER_FILES["$CLUSTER_NAME"]="$CONFIG_FILE"
             CLUSTER_COUNT=$((CLUSTER_COUNT + 1))
 
-
-            warn_deprecated_cluster_fields "$CONFIG_FILE"
             ;;
 
 
@@ -645,12 +665,6 @@ if [ "$QUIET" -eq 0 ]; then
         echo "Tool source override:"
         echo "  ${TOOL_SOURCE_FILES[0]}"
 
-    fi
-
-
-    if [ "$VALIDATION_WARNINGS" -ne 0 ]; then
-        echo
-        echo "Warnings: $VALIDATION_WARNINGS"
     fi
 
     echo

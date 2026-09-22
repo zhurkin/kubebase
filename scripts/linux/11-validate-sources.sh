@@ -47,6 +47,9 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -99,33 +102,10 @@ UNIQUE_REQUIREMENTS=0
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
 validation_error()
 {
     echo "ERROR: $*" >&2
     VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-}
-
-
-canonical_file()
-{
-    local path="$1"
-    local dir
-    local file
-
-    dir="$(dirname -- "$path")"
-    file="$(basename -- "$path")"
-
-    (
-        cd -- "$dir"
-        printf '%s/%s\n' "$(pwd -P)" "$file"
-    )
 }
 
 
@@ -481,19 +461,19 @@ done
 # ----------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || \
-    fail "jq is required"
+    kb_fail "jq is required"
 
 
 if [ "$OFFLINE" -eq 0 ]; then
 
     command -v curl >/dev/null 2>&1 || \
-        fail "curl is required; use --offline to skip network checks"
+        kb_fail "curl is required; use --offline to skip network checks"
 
 fi
 
 
 [ -x "$CONFIG_VALIDATOR" ] || \
-    fail "configuration validator not found or not executable: $CONFIG_VALIDATOR"
+    kb_fail "configuration validator not found or not executable: $CONFIG_VALIDATOR"
 
 
 # ----------------------------------------------------------------------
@@ -512,14 +492,14 @@ fi
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 
-    fail \
+    kb_fail \
         "invalid workspace name: $WORKSPACE_NAME"
 
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail "workspace root not found: $WORKSPACE_ROOT"
+    kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -532,15 +512,12 @@ WORKSPACE_FILE="$WORKSPACE_DIR/workspace.json"
 
 
 [ -d "$WORKSPACE_DIR" ] || \
-    fail "workspace not found: $WORKSPACE_DIR"
+    kb_fail "workspace not found: $WORKSPACE_DIR"
 
 
-[ -f "$WORKSPACE_FILE" ] || \
-    fail "workspace configuration not found: $WORKSPACE_FILE"
-
-
-jq empty "$WORKSPACE_FILE" >/dev/null 2>&1 || \
-    fail "invalid workspace JSON: $WORKSPACE_FILE"
+kb_require_readable_json_file \
+    "$WORKSPACE_FILE" \
+    "workspace configuration"
 
 
 if ! jq -e \
@@ -569,7 +546,7 @@ if ! jq -e \
 ' "$WORKSPACE_FILE" >/dev/null 2>&1
 then
 
-    fail \
+    kb_fail \
         "unsupported or invalid workspace configuration: $WORKSPACE_FILE"
 
 fi
@@ -598,7 +575,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -654,12 +631,9 @@ done
 # Built-in tool source configuration
 # ----------------------------------------------------------------------
 
-[ -f "$DEFAULT_SOURCES_FILE" ] || \
-    fail "default tool source configuration not found: $DEFAULT_SOURCES_FILE"
-
-
-jq empty "$DEFAULT_SOURCES_FILE" >/dev/null 2>&1 || \
-    fail "invalid JSON: $DEFAULT_SOURCES_FILE"
+kb_require_readable_json_file \
+    "$DEFAULT_SOURCES_FILE" \
+    "default tool source configuration"
 
 
 if ! jq -e \
@@ -673,7 +647,7 @@ if ! jq -e \
 ' "$DEFAULT_SOURCES_FILE" >/dev/null 2>&1
 then
 
-    fail \
+    kb_fail \
         "invalid default tool source schema: $DEFAULT_SOURCES_FILE"
 
 fi
@@ -691,12 +665,13 @@ fi
 
 if [ "$TOOL_SOURCES_EXPLICIT" -eq 1 ]; then
 
-    [ -f "$TOOL_SOURCES_FILE" ] || \
-        fail "tool source override not found: $TOOL_SOURCES_FILE"
+    kb_require_readable_file \
+        "$TOOL_SOURCES_FILE" \
+        "tool source override"
 
 
     TOOL_SOURCES_FILE="$(
-        canonical_file "$TOOL_SOURCES_FILE"
+        kb_canonical_file "$TOOL_SOURCES_FILE"
     )"
 
 
@@ -740,8 +715,9 @@ fi
 
 if [ -n "$TOOL_SOURCES_FILE" ]; then
 
-    jq empty "$TOOL_SOURCES_FILE" >/dev/null 2>&1 || \
-        fail "invalid JSON: $TOOL_SOURCES_FILE"
+    kb_require_readable_json_file \
+        "$TOOL_SOURCES_FILE" \
+        "tool source override"
 
 
     if ! jq -e \
@@ -755,7 +731,7 @@ if [ -n "$TOOL_SOURCES_FILE" ]; then
     ' "$TOOL_SOURCES_FILE" >/dev/null 2>&1
     then
 
-        fail \
+        kb_fail \
             "invalid tool source schema: $TOOL_SOURCES_FILE"
 
     fi
@@ -799,7 +775,7 @@ if [ -n "$TOOL_SOURCES_FILE" ]; then
 
         if (( (FILE_MODE_NUM & 077) != 0 )); then
 
-            fail \
+            kb_fail \
                 "$TOOL_SOURCES_FILE contains inline credentials but permissions are $FILE_MODE; use chmod 600"
 
         fi
@@ -857,7 +833,7 @@ if [ -n "$TOOL_SOURCES_FILE" ]; then
             ' "$TOOL_SOURCES_FILE" >/dev/null 2>&1
             then
 
-                fail \
+                kb_fail \
                     "override source '$SOURCE_NAME' changes platforms but does not define probeUrl"
 
             fi

@@ -28,6 +28,9 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -106,29 +109,6 @@ EOF
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
-canonical_file()
-{
-    local path="$1"
-    local dir
-    local file
-
-    dir="$(dirname -- "$path")"
-    file="$(basename -- "$path")"
-
-    (
-        cd -- "$dir"
-        printf '%s/%s\n' "$(pwd -P)" "$file"
-    )
-}
-
 
 validate_workspace_envelope()
 {
@@ -253,7 +233,7 @@ ensure_workspace_entrypoint()
 
     if [ -e "$link_path" ]; then
 
-        fail \
+        kb_fail \
             "refusing to overwrite non-symlink workspace entrypoint: $link_path"
 
     fi
@@ -356,7 +336,7 @@ fi
 
 
 [ -f "$REPO_ROOT/$WORKSPACE_ENTRYPOINT_NAME" ] || \
-    fail \
+    kb_fail \
         "repository entrypoint not found: $REPO_ROOT/$WORKSPACE_ENTRYPOINT_NAME"
 
 
@@ -366,7 +346,7 @@ fi
 
 if [ ! -f "$DEFAULT_WORKSPACE_CONFIG" ]; then
 
-    fail \
+    kb_fail \
         "default workspace configuration not found: $DEFAULT_WORKSPACE_CONFIG"
 
 fi
@@ -374,7 +354,7 @@ fi
 
 if ! jq empty "$DEFAULT_WORKSPACE_CONFIG" >/dev/null 2>&1; then
 
-    fail \
+    kb_fail \
         "invalid JSON: $DEFAULT_WORKSPACE_CONFIG"
 
 fi
@@ -382,7 +362,7 @@ fi
 
 if ! validate_workspace_envelope "$DEFAULT_WORKSPACE_CONFIG"; then
 
-    fail \
+    kb_fail \
         "invalid workspace schema: $DEFAULT_WORKSPACE_CONFIG"
 
 fi
@@ -402,20 +382,20 @@ if [ "$WORKSPACE_CONFIG_EXPLICIT" -eq 1 ]; then
 
     if [ ! -f "$WORKSPACE_CONFIG_FILE" ]; then
 
-        fail \
+        kb_fail \
             "workspace configuration override not found: $WORKSPACE_CONFIG_FILE"
 
     fi
 
     WORKSPACE_CONFIG_FILE="$(
-        canonical_file "$WORKSPACE_CONFIG_FILE"
+        kb_canonical_file "$WORKSPACE_CONFIG_FILE"
     )"
 
 
 elif [ -f "$AUTO_WORKSPACE_CONFIG" ]; then
 
     WORKSPACE_CONFIG_FILE="$(
-        canonical_file "$AUTO_WORKSPACE_CONFIG"
+        kb_canonical_file "$AUTO_WORKSPACE_CONFIG"
     )"
 
 
@@ -434,7 +414,7 @@ if [ -n "$WORKSPACE_CONFIG_FILE" ]; then
 
     if ! jq empty "$WORKSPACE_CONFIG_FILE" >/dev/null 2>&1; then
 
-        fail \
+        kb_fail \
             "invalid JSON: $WORKSPACE_CONFIG_FILE"
 
     fi
@@ -442,7 +422,7 @@ if [ -n "$WORKSPACE_CONFIG_FILE" ]; then
 
     if ! validate_workspace_envelope "$WORKSPACE_CONFIG_FILE"; then
 
-        fail \
+        kb_fail \
             "invalid workspace schema: $WORKSPACE_CONFIG_FILE"
 
     fi
@@ -473,7 +453,7 @@ if [ -n "$WORKSPACE_NAME_OVERRIDE" ]; then
 
     if [[ ! "$WORKSPACE_NAME_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 
-        fail \
+        kb_fail \
             "invalid workspace name: $WORKSPACE_NAME_OVERRIDE"
 
     fi
@@ -495,7 +475,7 @@ fi
 
 if ! validate_effective_workspace "$EFFECTIVE_WORKSPACE"; then
 
-    fail \
+    kb_fail \
         "effective workspace configuration is invalid"
 
 fi
@@ -510,7 +490,7 @@ WORKSPACE_NAME="$(
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 
-    fail \
+    kb_fail \
         "invalid workspace name: $WORKSPACE_NAME"
 
 fi
@@ -539,14 +519,11 @@ mkdir -p -- "$WORKSPACE_DIR"
 # Never overwrite workspace.json.
 # ----------------------------------------------------------------------
 
-if [ -f "$WORKSPACE_FILE" ]; then
+if [ -e "$WORKSPACE_FILE" ] || [ -L "$WORKSPACE_FILE" ]; then
 
-    if ! jq empty "$WORKSPACE_FILE" >/dev/null 2>&1; then
-
-        fail \
-            "invalid existing workspace JSON: $WORKSPACE_FILE"
-
-    fi
+    kb_require_readable_json_file \
+        "$WORKSPACE_FILE" \
+        "existing workspace configuration"
 
 
     EXISTING_WORKSPACE="$(
@@ -556,7 +533,7 @@ if [ -f "$WORKSPACE_FILE" ]; then
 
     if ! validate_effective_workspace "$EXISTING_WORKSPACE"; then
 
-        fail \
+        kb_fail \
             "unsupported existing workspace configuration: $WORKSPACE_FILE"
 
     fi
@@ -571,7 +548,7 @@ if [ -f "$WORKSPACE_FILE" ]; then
 
     if [ "$EXISTING_NAME" != "$WORKSPACE_NAME" ]; then
 
-        fail \
+        kb_fail \
             "existing workspace name does not match requested workspace"
 
     fi
@@ -587,7 +564,10 @@ else
     printf '%s\n' "$EFFECTIVE_WORKSPACE" \
         > "$TMP_WORKSPACE_FILE"
 
-    chmod 600 "$TMP_WORKSPACE_FILE"
+    # workspace.json contains routing/configuration metadata, not credentials.
+    # Keep it readable even when the workspace was initialized by another
+    # administrative user; sensitive kubeconfigs remain mode 600 elsewhere.
+    chmod 644 "$TMP_WORKSPACE_FILE"
 
     mv \
         "$TMP_WORKSPACE_FILE" \
@@ -641,30 +621,6 @@ mkdir -p \
 
 
 # ----------------------------------------------------------------------
-# Legacy runtime directory
-#
-# runtime/ used to be a public workspace directory. No current step uses
-# it. Remove it only when it is an empty real directory; never delete user
-# content and never follow a symlink.
-# ----------------------------------------------------------------------
-
-LEGACY_RUNTIME_DIR="$WORKSPACE_DIR/runtime"
-LEGACY_RUNTIME_STATUS="absent"
-
-if [ -L "$LEGACY_RUNTIME_DIR" ]; then
-    LEGACY_RUNTIME_STATUS="retained (symlink)"
-elif [ -d "$LEGACY_RUNTIME_DIR" ]; then
-    if rmdir -- "$LEGACY_RUNTIME_DIR" 2>/dev/null; then
-        LEGACY_RUNTIME_STATUS="removed (empty)"
-    else
-        LEGACY_RUNTIME_STATUS="retained (not empty)"
-    fi
-elif [ -e "$LEGACY_RUNTIME_DIR" ]; then
-    LEGACY_RUNTIME_STATUS="retained (non-directory)"
-fi
-
-
-# ----------------------------------------------------------------------
 # config symlink
 #
 # workspace/config -> configured external directory
@@ -684,7 +640,7 @@ if [ "$CONFIG_DIR" != "$WORKSPACE_DIR/config" ]; then
 
         if [ "$CURRENT_LINK_TARGET" != "$CONFIG_DIR" ]; then
 
-            fail \
+            kb_fail \
                 "existing config symlink points to another directory: $CONFIG_LINK"
 
         fi
@@ -692,7 +648,7 @@ if [ "$CONFIG_DIR" != "$WORKSPACE_DIR/config" ]; then
 
     elif [ -e "$CONFIG_LINK" ]; then
 
-        fail \
+        kb_fail \
             "workspace path is reserved for config symlink: $CONFIG_LINK"
 
 
@@ -766,10 +722,6 @@ echo "Directories:"
 echo "  artifacts : $WORKSPACE_DIR/artifacts"
 echo "  tools     : $WORKSPACE_DIR/tools"
 echo "  clusters  : $WORKSPACE_DIR/clusters"
-
-echo
-echo "Legacy cleanup:"
-echo "  runtime   : $LEGACY_RUNTIME_STATUS"
 
 echo
 echo "Initialization complete."

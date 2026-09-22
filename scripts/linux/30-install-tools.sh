@@ -47,6 +47,9 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -95,13 +98,6 @@ declare -A REQUIREMENT_CLUSTERS=()
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
 
 cleanup()
 {
@@ -168,50 +164,6 @@ EOF_USAGE
 }
 
 
-detect_host_platform()
-{
-    local os_name
-    local arch_name
-
-
-    case "$(uname -s)" in
-
-        Linux)
-            os_name="linux"
-            ;;
-
-        *)
-            fail \
-                "unsupported host operating system for Linux installer: $(uname -s)"
-            ;;
-
-    esac
-
-
-    case "$(uname -m)" in
-
-        x86_64|amd64)
-            arch_name="amd64"
-            ;;
-
-        aarch64|arm64)
-            arch_name="arm64"
-            ;;
-
-        *)
-            fail \
-                "unsupported host architecture: $(uname -m)"
-            ;;
-
-    esac
-
-
-    printf '%s-%s\n' \
-        "$os_name" \
-        "$arch_name"
-}
-
-
 safe_component()
 {
     local value="$1"
@@ -219,14 +171,6 @@ safe_component()
     [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*$ ]] &&
     [ "$value" != "." ] &&
     [ "$value" != ".." ]
-}
-
-
-safe_filename()
-{
-    local value="$1"
-
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
 }
 
 
@@ -489,10 +433,10 @@ verify_artifact_store()
     expected="${expected,,}"
 
 
-    safe_filename "$artifact_file" || \
+    kb_safe_filename "$artifact_file" || \
         return 1
 
-    safe_filename "$checksum_file" || \
+    kb_safe_filename "$checksum_file" || \
         return 1
 
     safe_member_path "$source_binary" || \
@@ -735,7 +679,7 @@ verify_existing_install()
     artifact_sha256="${artifact_sha256,,}"
 
 
-    safe_filename "$binary_file" || \
+    kb_safe_filename "$binary_file" || \
         return 1
 
 
@@ -806,7 +750,7 @@ while [ "$#" -gt 0 ]; do
 
 
             if [ "$ALL_PLATFORMS" -ne 0 ]; then
-                fail \
+                kb_fail \
                     "--platform and --all-platforms cannot be used together"
             fi
 
@@ -820,7 +764,7 @@ while [ "$#" -gt 0 ]; do
         --all-platforms)
 
             if [ -n "$PLATFORM_FILTER" ]; then
-                fail \
+                kb_fail \
                     "--platform and --all-platforms cannot be used together"
             fi
 
@@ -866,17 +810,17 @@ done
 # ----------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || \
-    fail "jq is required"
+    kb_fail "jq is required"
 
 command -v sha256sum >/dev/null 2>&1 || \
-    fail "sha256sum is required"
+    kb_fail "sha256sum is required"
 
 command -v mktemp >/dev/null 2>&1 || \
-    fail "mktemp is required"
+    kb_fail "mktemp is required"
 
 
 [ -x "$CONFIG_VALIDATOR" ] || \
-    fail \
+    kb_fail \
         "configuration validator not found or not executable: $CONFIG_VALIDATOR"
 
 
@@ -901,14 +845,14 @@ command -v mktemp >/dev/null 2>&1 || \
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 
-    fail \
+    kb_fail \
         "invalid workspace name: $WORKSPACE_NAME"
 
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail \
+    kb_fail \
         "workspace root not found: $WORKSPACE_ROOT"
 
 
@@ -926,15 +870,15 @@ TOOLS_DIR="$WORKSPACE_DIR/tools"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
-    fail \
+    kb_fail \
         "workspace configuration not found: $WORKSPACE_FILE"
 
 [ -d "$ARTIFACTS_DIR" ] || \
-    fail \
+    kb_fail \
         "artifact directory not found: $ARTIFACTS_DIR"
 
 [ -d "$TOOLS_DIR" ] || \
-    fail \
+    kb_fail \
         "tools directory not found: $TOOLS_DIR"
 
 
@@ -961,7 +905,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail \
+    kb_fail \
         "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
@@ -1025,7 +969,7 @@ if [ "$ALL_PLATFORMS" -eq 0 ] &&
 then
 
     PLATFORM_FILTER="$(
-        detect_host_platform
+        kb_detect_host_platform "Linux installer"
     )"
 
     PLATFORM_DESCRIPTION="$PLATFORM_FILTER (current host)"
@@ -1215,15 +1159,15 @@ do
 
 
     safe_component "$TOOL_NAME" || \
-        fail \
+        kb_fail \
             "unsafe tool name: $TOOL_NAME"
 
     safe_component "$TOOL_VERSION" || \
-        fail \
+        kb_fail \
             "unsafe tool version: $TOOL_VERSION"
 
     safe_component "$TOOL_PLATFORM" || \
-        fail \
+        kb_fail \
             "unsafe tool platform: $TOOL_PLATFORM"
 
 
@@ -1260,7 +1204,7 @@ do
     # ------------------------------------------------------------------
 
     [ -d "$ARTIFACT_DIR" ] || \
-        fail \
+        kb_fail \
             "required artifact is missing: $ARTIFACT_DIR; run: kubebase fetch --platform $TOOL_PLATFORM"
 
 
@@ -1275,7 +1219,7 @@ do
         "$TOOL_PLATFORM"
     then
 
-        fail \
+        kb_fail \
             "artifact verification failed: $ARTIFACT_DIR"
 
     fi
@@ -1343,7 +1287,7 @@ do
         fi
 
 
-        fail \
+        kb_fail \
             "existing tool installation is incomplete or corrupt: $FINAL_DIR"
 
     fi
@@ -1351,7 +1295,7 @@ do
 
     if [ -e "$FINAL_DIR" ]; then
 
-        fail \
+        kb_fail \
             "tool destination exists and is not a directory: $FINAL_DIR"
 
     fi
@@ -1403,7 +1347,7 @@ do
         tar.gz)
 
             command -v tar >/dev/null 2>&1 || \
-                fail \
+                kb_fail \
                     "tar is required to install $TOOL_NAME"
 
 
@@ -1415,7 +1359,7 @@ do
 
 
             [ -n "$TAR_MEMBER" ] || \
-                fail \
+                kb_fail \
                     "binary '$SOURCE_BINARY' not found in archive: $ARTIFACT_FILE"
 
 
@@ -1430,7 +1374,7 @@ do
         zip)
 
             command -v unzip >/dev/null 2>&1 || \
-                fail \
+                kb_fail \
                     "unzip is required to install $TOOL_NAME"
 
 
@@ -1442,7 +1386,7 @@ do
 
 
             [ -n "$ZIP_MEMBER" ] || \
-                fail \
+                kb_fail \
                     "binary '$SOURCE_BINARY' not found in archive: $ARTIFACT_FILE"
 
 
@@ -1455,7 +1399,7 @@ do
 
         *)
 
-            fail \
+            kb_fail \
                 "unsupported artifact type '$ARTIFACT_TYPE' for $TOOL_NAME"
             ;;
 
@@ -1467,7 +1411,7 @@ do
     # ------------------------------------------------------------------
 
     [ -s "$STAGED_BINARY" ] || \
-        fail \
+        kb_fail \
             "installed binary is empty: $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
 
 
@@ -1542,7 +1486,7 @@ do
 
     if [ -e "$FINAL_DIR" ]; then
 
-        fail \
+        kb_fail \
             "tool destination appeared during installation: $FINAL_DIR"
 
     fi

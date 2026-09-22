@@ -38,6 +38,9 @@ SCRIPT_DIR="$(
     pwd -P
 )"
 
+LIB_DIR="$SCRIPT_DIR/lib"
+source "$LIB_DIR/common.sh"
+
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
     pwd -P
@@ -95,13 +98,6 @@ declare -A REQUIREMENT_CLUSTERS=()
 # Helpers
 # ----------------------------------------------------------------------
 
-fail()
-{
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
 cleanup()
 {
     if [ -n "$ACTIVE_STAGE" ] && [ -d "$ACTIVE_STAGE" ]; then
@@ -119,22 +115,6 @@ cleanup()
 
 
 trap cleanup EXIT HUP INT TERM
-
-
-canonical_file()
-{
-    local path="$1"
-    local dir
-    local file
-
-    dir="$(dirname -- "$path")"
-    file="$(basename -- "$path")"
-
-    (
-        cd -- "$dir"
-        printf '%s/%s\n' "$(pwd -P)" "$file"
-    )
-}
 
 
 usage()
@@ -205,14 +185,6 @@ url_basename()
     url="${url%/}"
 
     basename -- "$url"
-}
-
-
-safe_filename()
-{
-    local name="$1"
-
-    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
 }
 
 
@@ -293,15 +265,15 @@ read_auth_secret()
         )"
 
         if [[ ! "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-            fail "invalid authentication environment variable name: $env_name"
+            kb_fail "invalid authentication environment variable name: $env_name"
         fi
 
         if ! value="$(printenv "$env_name")"; then
-            fail "authentication environment variable is not set: $env_name"
+            kb_fail "authentication environment variable is not set: $env_name"
         fi
 
         if [ -z "$value" ]; then
-            fail "authentication environment variable is empty: $env_name"
+            kb_fail "authentication environment variable is empty: $env_name"
         fi
 
         printf '%s' "$value"
@@ -322,21 +294,21 @@ read_auth_secret()
         )"
 
         if [[ "$file_name" != /* ]]; then
-            fail "authentication secret file must currently use an absolute path: $file_name"
+            kb_fail "authentication secret file must currently use an absolute path: $file_name"
         fi
 
         [ -f "$file_name" ] || \
-            fail "authentication secret file not found: $file_name"
+            kb_fail "authentication secret file not found: $file_name"
 
         [ -r "$file_name" ] || \
-            fail "authentication secret file is not readable: $file_name"
+            kb_fail "authentication secret file is not readable: $file_name"
 
         cat -- "$file_name"
         return 0
     fi
 
 
-    fail "authentication secret is not configured"
+    kb_fail "authentication secret is not configured"
 }
 
 
@@ -346,7 +318,7 @@ curl_config_escape()
 
     case "$value" in
         *$'\n'*|*$'\r'*)
-            fail "authentication value contains newline characters"
+            kb_fail "authentication value contains newline characters"
             ;;
     esac
 
@@ -412,7 +384,7 @@ prepare_auth_file()
             )"
 
             if [[ "$username" == *:* ]]; then
-                fail "basic authentication username must not contain ':'"
+                kb_fail "basic authentication username must not contain ':'"
             fi
 
             password="$(
@@ -460,7 +432,7 @@ prepare_auth_file()
             )"
 
             if [[ ! "$header_name" =~ ^[A-Za-z0-9-]+$ ]]; then
-                fail "invalid HTTP authentication header name: $header_name"
+                kb_fail "invalid HTTP authentication header name: $header_name"
             fi
 
             header_value="$(
@@ -482,7 +454,7 @@ prepare_auth_file()
 
 
         *)
-            fail "unsupported authentication type: $auth_type"
+            kb_fail "unsupported authentication type: $auth_type"
             ;;
 
     esac
@@ -687,8 +659,8 @@ verify_existing_artifact()
     expected="${expected,,}"
 
 
-    safe_filename "$artifact_file" || return 1
-    safe_filename "$checksum_file" || return 1
+    kb_safe_filename "$artifact_file" || return 1
+    kb_safe_filename "$checksum_file" || return 1
 
 
     [ -f "$dir/$artifact_file" ] || return 1
@@ -807,20 +779,20 @@ done
 # ----------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || \
-    fail "jq is required"
+    kb_fail "jq is required"
 
 command -v curl >/dev/null 2>&1 || \
-    fail "curl is required"
+    kb_fail "curl is required"
 
 command -v sha256sum >/dev/null 2>&1 || \
-    fail "sha256sum is required"
+    kb_fail "sha256sum is required"
 
 command -v mktemp >/dev/null 2>&1 || \
-    fail "mktemp is required"
+    kb_fail "mktemp is required"
 
 
 [ -x "$SOURCE_VALIDATOR" ] || \
-    fail "source validator not found or not executable: $SOURCE_VALIDATOR"
+    kb_fail "source validator not found or not executable: $SOURCE_VALIDATOR"
 
 
 # ----------------------------------------------------------------------
@@ -858,12 +830,12 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ ! "$WORKSPACE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    fail "invalid workspace name: $WORKSPACE_NAME"
+    kb_fail "invalid workspace name: $WORKSPACE_NAME"
 fi
 
 
 [ -d "$WORKSPACE_ROOT" ] || \
-    fail "workspace root not found: $WORKSPACE_ROOT"
+    kb_fail "workspace root not found: $WORKSPACE_ROOT"
 
 
 WORKSPACE_ROOT="$(
@@ -877,10 +849,10 @@ ARTIFACTS_DIR="$WORKSPACE_DIR/artifacts"
 
 
 [ -f "$WORKSPACE_FILE" ] || \
-    fail "workspace configuration not found: $WORKSPACE_FILE"
+    kb_fail "workspace configuration not found: $WORKSPACE_FILE"
 
 [ -d "$ARTIFACTS_DIR" ] || \
-    fail "artifact directory not found: $ARTIFACTS_DIR"
+    kb_fail "artifact directory not found: $ARTIFACTS_DIR"
 
 
 # ----------------------------------------------------------------------
@@ -902,7 +874,7 @@ fi
 
 
 [ -d "$CONFIG_DIR_CANDIDATE" ] || \
-    fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
+    kb_fail "configuration directory not found: $CONFIG_DIR_CANDIDATE"
 
 
 CONFIG_DIR="$(
@@ -955,16 +927,16 @@ done
 # ----------------------------------------------------------------------
 
 [ -f "$DEFAULT_SOURCES_FILE" ] || \
-    fail "default tool source configuration not found: $DEFAULT_SOURCES_FILE"
+    kb_fail "default tool source configuration not found: $DEFAULT_SOURCES_FILE"
 
 
 if [ "$TOOL_SOURCES_EXPLICIT" -eq 1 ]; then
 
     [ -f "$TOOL_SOURCES_FILE" ] || \
-        fail "tool source override not found: $TOOL_SOURCES_FILE"
+        kb_fail "tool source override not found: $TOOL_SOURCES_FILE"
 
     TOOL_SOURCES_FILE="$(
-        canonical_file "$TOOL_SOURCES_FILE"
+        kb_canonical_file "$TOOL_SOURCES_FILE"
     )"
 
 
@@ -983,7 +955,7 @@ else
 
 
         *)
-            fail "multiple $TOOL_SOURCES_SCHEMA documents found"
+            kb_fail "multiple $TOOL_SOURCES_SCHEMA documents found"
             ;;
 
     esac
@@ -1207,7 +1179,7 @@ do
 
 
     safe_version "$TOOL_VERSION" || \
-        fail "unsafe tool version '$TOOL_VERSION' for tool '$TOOL_NAME'"
+        kb_fail "unsafe tool version '$TOOL_VERSION' for tool '$TOOL_NAME'"
 
 
     REQUIREMENT_KEY="${TOOL_NAME}"$'\x1f'"${TOOL_VERSION}"$'\x1f'"${TOOL_PLATFORM}"
@@ -1297,14 +1269,14 @@ do
     )"
 
 
-    safe_filename "$ARTIFACT_FILENAME" || \
-        fail "unsafe artifact filename resolved from URL: $ARTIFACT_URL"
+    kb_safe_filename "$ARTIFACT_FILENAME" || \
+        kb_fail "unsafe artifact filename resolved from URL: $ARTIFACT_URL"
 
-    safe_filename "$CHECKSUM_FILENAME" || \
-        fail "unsafe checksum filename resolved from URL: $CHECKSUM_URL"
+    kb_safe_filename "$CHECKSUM_FILENAME" || \
+        kb_fail "unsafe checksum filename resolved from URL: $CHECKSUM_URL"
 
     [ "$ARTIFACT_FILENAME" != "$CHECKSUM_FILENAME" ] || \
-        fail "artifact and checksum resolve to the same filename: $ARTIFACT_FILENAME"
+        kb_fail "artifact and checksum resolve to the same filename: $ARTIFACT_FILENAME"
 
 
     FINAL_PARENT="$ARTIFACTS_DIR/$TOOL_PLATFORM/$TOOL_NAME"
@@ -1338,12 +1310,12 @@ do
         fi
 
 
-        fail "existing artifact directory is incomplete or corrupt: $FINAL_DIR"
+        kb_fail "existing artifact directory is incomplete or corrupt: $FINAL_DIR"
     fi
 
 
     if [ -e "$FINAL_DIR" ]; then
-        fail "artifact destination exists and is not a directory: $FINAL_DIR"
+        kb_fail "artifact destination exists and is not a directory: $FINAL_DIR"
     fi
 
 
@@ -1410,7 +1382,7 @@ do
             "$ARTIFACT_FILENAME"
     )"
     then
-        fail "unable to extract SHA-256 for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
+        kb_fail "unable to extract SHA-256 for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM"
     fi
 
 
@@ -1423,7 +1395,7 @@ do
 
 
     if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-        fail "SHA-256 mismatch for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
+        kb_fail "SHA-256 mismatch for $TOOL_NAME $TOOL_VERSION $TOOL_PLATFORM: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
     fi
 
 
@@ -1499,7 +1471,7 @@ do
 
 
     if [ -e "$FINAL_DIR" ]; then
-        fail "artifact destination appeared during fetch: $FINAL_DIR"
+        kb_fail "artifact destination appeared during fetch: $FINAL_DIR"
     fi
 
 
