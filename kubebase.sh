@@ -70,15 +70,15 @@ $PROJECT_NAME
 Usage:
   $(basename "$0") COMMAND [options]
 
-Commands:
+Setup:
   init
       Initialize the KubeBase workspace.
 
-  validate-config
-      Validate all configuration documents.
+  validate config
+      Validate configuration documents.
 
-  validate-sources
-      Validate tool source configuration and cluster requirements.
+  validate sources [--offline]
+      Validate tool sources and cluster requirements.
 
   fetch
       Download and verify required tool artifacts.
@@ -86,88 +86,72 @@ Commands:
   install
       Install verified artifacts into the shared tool store.
 
-  materialize-clusters
-      Materialize configured clusters, host toolchains and users inside
-      the workspace.
+  materialize
+      Materialize configured clusters, host toolchains and users.
 
-  validate-users
-      Validate materialized users and kubeconfig files locally.
+  validate users
+      Validate materialized users and kubeconfigs locally.
 
-  validate-live
-      Validate configured profiles against the live Kubernetes API and
-      refresh namespace discovery cache.
+  validate live
+      Validate profiles against the live Kubernetes API and refresh
+      namespace inventory cache.
 
-  validate-environments
-      Compatibility alias for validate-live.
-
+Profiles:
   profiles
       List configured cluster/user profiles and local readiness.
 
-  shell-init bash
-      Emit Bash integration for profile activation.
-
   use [CLUSTER/USER]
-      Activate a profile in the current shell (requires shell-init).
+      Activate a profile in the current shell.
 
-  current
-      Show the currently active KubeBase profile and namespace/group navigation.
-
-  namespaces
-      Discover namespaces visible to the active profile (live by default,
-      cached fallback).
-
-  ns [NAME|--clear]
-      Select or clear the active Kubernetes namespace (requires shell-init).
-
-  groups
-      List namespace group IDs discovered from namespace metadata.
-
-  group [GROUP|--clear]
-      Select or clear the namespace group navigation filter (requires shell-init).
+  current [--verbose]
+      Show the active profile. --verbose includes kubeconfig and full
+      toolchain diagnostics.
 
   off
-      Deactivate the current profile (requires shell-init).
+      Deactivate the current profile.
 
+Navigation:
+  namespaces [--cached|--live] [--verbose]
+      List namespaces visible to the active profile.
+
+  ns [NAME|--clear]
+      Select or clear the active Kubernetes namespace.
+
+  groups [--cached|--live] [--verbose]
+      List namespace groups discovered from namespace metadata.
+
+  group [GROUP|--clear]
+      Select or clear the namespace group filter.
+
+Shell:
+  shell init bash
+      Emit Bash integration for commands that modify the current shell.
+
+Other:
   help
       Show this help.
 
 Examples:
   $(basename "$0") init
-
-  $(basename "$0") validate-config
-
-  $(basename "$0") validate-sources --offline
-
-  $(basename "$0") fetch --dry-run
-
+  $(basename "$0") validate config
+  $(basename "$0") validate sources --offline
   $(basename "$0") fetch
-
-  $(basename "$0") install --dry-run
-
   $(basename "$0") install
-
-  $(basename "$0") materialize-clusters
-
-  $(basename "$0") validate-users
-
-  $(basename "$0") validate-live
-
+  $(basename "$0") materialize
+  $(basename "$0") validate users
+  $(basename "$0") validate live
   $(basename "$0") profiles
 
-  eval "\$(./kubebase.sh shell-init bash)"
+  eval "\$(./kubebase.sh shell init bash)"
 
   kubebase use my-cluster/default
-
   kubebase current
-
+  kubebase current --verbose
   kubebase namespaces
-
+  kubebase namespaces --verbose
   kubebase ns default
-
   kubebase groups
-
   kubebase group GROUP-ID
-
   kubebase off
 EOF_USAGE
 }
@@ -179,253 +163,162 @@ COMMAND="${1:-help}"
 case "$COMMAND" in
 
     init)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/00-init-workspace.sh" \
-            "$@"
+        exec "$SCRIPTS_DIR/00-init-workspace.sh" "$@"
         ;;
 
-
-    validate-config)
-
+    validate)
         shift
+        VALIDATE_TARGET="${1:-}"
 
-        exec \
-            "$SCRIPTS_DIR/10-validate-config.sh" \
-            "$@"
+        if [ -n "$VALIDATE_TARGET" ]; then
+            shift
+        fi
+
+        case "$VALIDATE_TARGET" in
+            config)
+                exec "$SCRIPTS_DIR/10-validate-config.sh" "$@"
+                ;;
+
+            sources)
+                exec "$SCRIPTS_DIR/11-validate-sources.sh" "$@"
+                ;;
+
+            users)
+                exec "$SCRIPTS_DIR/50-validate-users.sh" "$@"
+                ;;
+
+            live)
+                exec "$SCRIPTS_DIR/60-validate-live.sh" "$@"
+                ;;
+
+            "")
+                echo "ERROR: usage: $(basename "$0") validate {config|sources|users|live} [options]" >&2
+                exit 2
+                ;;
+
+            *)
+                echo "ERROR: unknown validation target: $VALIDATE_TARGET" >&2
+                echo "Usage: $(basename "$0") validate {config|sources|users|live} [options]" >&2
+                exit 2
+                ;;
+        esac
         ;;
 
-
-    validate-sources)
-
+    fetch)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/11-validate-sources.sh" \
-            "$@"
+        exec "$SCRIPTS_DIR/20-fetch-artifacts.sh" "$@"
         ;;
 
-
-    fetch|fetch-artifacts)
-
+    install)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/20-fetch-artifacts.sh" \
-            "$@"
+        exec "$SCRIPTS_DIR/30-install-tools.sh" "$@"
         ;;
 
-
-    install|install-tools)
-
+    materialize)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/30-install-tools.sh" \
-            "$@"
+        exec "$SCRIPTS_DIR/40-materialize-clusters.sh" "$@"
         ;;
-
-
-    materialize-clusters)
-
-        shift
-
-        exec \
-            "$SCRIPTS_DIR/40-materialize-clusters.sh" \
-            "$@"
-        ;;
-
-
-    validate-users|validate-credentials)
-
-        shift
-
-        exec \
-            "$SCRIPTS_DIR/50-validate-users.sh" \
-            "$@"
-        ;;
-
-
-    validate-live|validate-environments|validate-envs)
-
-        shift
-
-        exec \
-            "$SCRIPTS_DIR/60-validate-live.sh" \
-            "$@"
-        ;;
-
 
     profiles)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            profiles \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" profiles "$@"
         ;;
 
-
-    shell-init)
-
+    shell)
         shift
+        SHELL_TARGET="${1:-}"
 
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            shell-init \
-            "$@"
+        if [ -n "$SHELL_TARGET" ]; then
+            shift
+        fi
+
+        case "$SHELL_TARGET" in
+            init)
+                exec "$SCRIPTS_DIR/70-profile.sh" shell-init "$@"
+                ;;
+
+            "")
+                echo "ERROR: usage: $(basename "$0") shell init bash [options]" >&2
+                exit 2
+                ;;
+
+            *)
+                echo "ERROR: unknown shell command: $SHELL_TARGET" >&2
+                echo "Usage: $(basename "$0") shell init bash [options]" >&2
+                exit 2
+                ;;
+        esac
         ;;
-
 
     use)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            use-direct \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" use-direct "$@"
         ;;
-
 
     current)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            current \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" current "$@"
         ;;
-
 
     namespaces)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            namespaces \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" namespaces "$@"
         ;;
-
 
     ns)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            ns-direct \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" ns-direct "$@"
         ;;
 
-
-    groups|projects)
-
+    groups)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            groups \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" groups "$@"
         ;;
 
-
-    group|project)
-
+    group)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            group-direct \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" group-direct "$@"
         ;;
-
 
     off)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            off-direct \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" off-direct "$@"
         ;;
-
 
     __profile-select)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            __profile-select \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" __profile-select "$@"
         ;;
-
 
     __profile-use)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            __profile-use \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" __profile-use "$@"
         ;;
-
 
     __profile-cleanup)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/70-profile.sh" \
-            __profile-cleanup \
-            "$@"
+        exec "$SCRIPTS_DIR/70-profile.sh" __profile-cleanup "$@"
         ;;
-
 
     __nav-ns)
-
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            __nav-ns \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" __nav-ns "$@"
         ;;
 
-
-    __nav-group|__nav-project)
-
+    __nav-group)
         shift
-
-        exec \
-            "$SCRIPTS_DIR/80-navigation.sh" \
-            __nav-group \
-            "$@"
+        exec "$SCRIPTS_DIR/80-navigation.sh" __nav-group "$@"
         ;;
-
 
     help|-h|--help)
-
         usage
         ;;
 
-
     *)
-
         echo "ERROR: unknown command: $COMMAND" >&2
         echo >&2
-
         usage >&2
-
         exit 2
         ;;
-
 esac

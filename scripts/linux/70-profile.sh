@@ -104,11 +104,11 @@ $PROJECT_NAME profile management
 
 Usage:
   $(basename "$0") profiles [options]
-  $(basename "$0") shell-init bash [options]
-  $(basename "$0") current
+  kubebase shell init bash [options]
+  kubebase current [--verbose]
 
 Internal activation is normally reached through the Bash function emitted
-by 'kubebase.sh shell-init bash'.
+by 'kubebase shell init bash'.
 
 Options:
   --workspace-name NAME
@@ -893,6 +893,8 @@ command_profiles()
     local selector
     local context
     local status
+    local marker
+    local active_selector=""
 
     local profile_width
     local context_width
@@ -908,6 +910,12 @@ command_profiles()
     local -a not_ready=()
 
     load_workspace
+
+    if [ "${KUBEBASE_ACTIVE:-}" = "1" ] && \
+       [ -n "${KUBEBASE_CLUSTER:-}" ] && \
+       [ -n "${KUBEBASE_USER:-}" ]; then
+        active_selector="$KUBEBASE_CLUSTER/$KUBEBASE_USER"
+    fi
 
     profile_width=7
     context_width=7
@@ -958,13 +966,13 @@ command_profiles()
     echo "Platform  : $HOST_PLATFORM"
     echo
 
-    printf '%-*s  %-*s  %-*s  %s\n' \
+    printf '  %-*s  %-*s  %-*s  %s\n' \
         "$profile_width" "PROFILE" \
         "$context_width" "CONTEXT" \
         "$platform_width" "PLATFORM" \
         "STATUS"
 
-    printf '%s  %s  %s  %s\n' \
+    printf '  %s  %s  %s  %s\n' \
         "$profile_sep" \
         "$context_sep" \
         "$platform_sep" \
@@ -973,7 +981,13 @@ command_profiles()
     local i
 
     for ((i = 0; i < ${#selectors[@]}; i++)); do
-        printf '%-*s  %-*s  %-*s  %s\n' \
+        marker=" "
+        if [ -n "$active_selector" ] && [ "${selectors[$i]}" = "$active_selector" ]; then
+            marker="*"
+        fi
+
+        printf '%s %-*s  %-*s  %-*s  %s\n' \
+            "$marker" \
             "$profile_width" "${selectors[$i]}" \
             "$context_width" "${contexts[$i]}" \
             "$platform_width" "$HOST_PLATFORM" \
@@ -1090,26 +1104,21 @@ command_emit_use()
 
 command_current()
 {
+    local verbose="${1:-0}"
     local namespace=""
+    local group_display="(none)"
+    local kubectl_version="?"
     local resolved_kubectl=""
     local command_name
     local tool_name
     local version
 
     if [ "${KUBEBASE_ACTIVE:-}" != "1" ]; then
-        echo "$PROJECT_NAME current profile"
+        echo "$PROJECT_NAME current"
         echo
         echo "Status : inactive"
         return 1
     fi
-
-    echo "$PROJECT_NAME current profile"
-    echo
-    echo "Cluster   : ${KUBEBASE_CLUSTER:-?}"
-    echo "User      : ${KUBEBASE_USER:-?}"
-    echo "Context   : ${KUBEBASE_CONTEXT:-?}"
-    echo "Selection : ${KUBEBASE_CONTEXT_SELECTION:-?}"
-    echo "Platform  : ${KUBEBASE_PLATFORM:-?}"
 
     if [ -x "${KUBEBASE_TOOLCHAIN_BIN:-}/kubectl" ] && \
        [ -f "${KUBEBASE_EFFECTIVE_KUBECONFIG:-}" ]; then
@@ -1131,18 +1140,37 @@ command_current()
     fi
 
     if [ -n "${KUBEBASE_GROUP:-}" ]; then
-        echo "Group     : $KUBEBASE_GROUP (filter)"
+        group_display="$KUBEBASE_GROUP (filter)"
     elif [ -n "${KUBEBASE_NAMESPACE_GROUP:-}" ]; then
-        echo "Group     : $KUBEBASE_NAMESPACE_GROUP (namespace)"
-    else
-        echo "Group     : (none)"
+        group_display="$KUBEBASE_NAMESPACE_GROUP (namespace)"
     fi
+
+    if [ -f "${KUBEBASE_TOOLCHAIN:-}/manifest.json" ]; then
+        kubectl_version="$(
+            jq -r '.commands.kubectl.version // "?"' \
+                "${KUBEBASE_TOOLCHAIN}/manifest.json" 2>/dev/null || printf '?'
+        )"
+    fi
+
+    echo "$PROJECT_NAME current"
+    echo
+    echo "Profile   : ${KUBEBASE_CLUSTER:-?}/${KUBEBASE_USER:-?}"
+    echo "Context   : ${KUBEBASE_CONTEXT:-?}"
+    echo "Group     : $group_display"
 
     if [ -n "$namespace" ]; then
         echo "Namespace : $namespace"
     else
         echo "Namespace : (default)"
     fi
+
+    echo "Platform  : ${KUBEBASE_PLATFORM:-?}"
+    echo "kubectl   : $kubectl_version"
+
+    [ "$verbose" -ne 0 ] || return 0
+
+    echo
+    echo "Selection : ${KUBEBASE_CONTEXT_SELECTION:-?}"
 
     echo
     echo "Kubeconfig:"
@@ -1292,7 +1320,8 @@ kubebase()
                 fi
             fi
 
-            "$KUBEBASE_ENTRYPOINT" current
+            echo "Activated $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+            echo "Context: $KUBEBASE_CONTEXT"
             ;;
 
         ns)
@@ -1319,7 +1348,7 @@ kubebase()
                 return 1
             fi
 
-            "$KUBEBASE_ENTRYPOINT" current
+            echo "Namespace: ${KUBEBASE_NAMESPACE:-(default)}"
             ;;
 
         group)
@@ -1346,11 +1375,29 @@ kubebase()
                 return 1
             fi
 
-            "$KUBEBASE_ENTRYPOINT" current
+            if [ -n "${KUBEBASE_GROUP:-}" ]; then
+                echo "Group: $KUBEBASE_GROUP"
+            else
+                echo "Group: (none)"
+            fi
+            echo "Namespace: ${KUBEBASE_NAMESPACE:-(default)}"
             ;;
 
         namespaces|groups)
             "$KUBEBASE_ENTRYPOINT" "$@"
+            ;;
+
+        shell)
+            shift || true
+
+            if [ "$#" -eq 2 ] && \
+               [ "$1" = "init" ] && \
+               [ "$2" = "bash" ]; then
+                echo "KubeBase Bash integration is already active."
+                return 0
+            fi
+
+            "$KUBEBASE_ENTRYPOINT" shell "$@"
             ;;
 
         off)
@@ -1438,7 +1485,7 @@ command_direct_use()
     echo >&2
     echo "Run once in the current shell:" >&2
     echo >&2
-    echo "  eval \"\$(./kubebase.sh shell-init bash)\"" >&2
+    echo "  eval \"\$(./kubebase.sh shell init bash)\"" >&2
     echo >&2
     echo "Then activate a profile with:" >&2
     echo >&2
@@ -1454,7 +1501,7 @@ command_direct_off()
     echo >&2
     echo "Run:" >&2
     echo >&2
-    echo "  eval \"\$(./kubebase.sh shell-init bash)\"" >&2
+    echo "  eval \"\$(./kubebase.sh shell init bash)\"" >&2
     return 2
 }
 
@@ -1496,7 +1543,7 @@ case "$SUBCOMMAND" in
         fi
 
         if [ "${#POSITIONAL_ARGS[@]}" -ne 1 ]; then
-            echo "ERROR: usage: shell-init bash [options]" >&2
+            echo "ERROR: usage: kubebase shell init bash [options]" >&2
             exit 2
         fi
 
@@ -1504,12 +1551,31 @@ case "$SUBCOMMAND" in
         ;;
 
     current)
-        [ "$#" -eq 0 ] || {
-            echo "ERROR: current takes no arguments" >&2
-            exit 2
-        }
+        CURRENT_VERBOSE=0
 
-        command_current
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --verbose)
+                    CURRENT_VERBOSE=1
+                    shift
+                    ;;
+
+                -h|--help)
+                    cat <<EOF_USAGE
+Usage:
+  kubebase current [--verbose]
+EOF_USAGE
+                    exit 0
+                    ;;
+
+                *)
+                    echo "ERROR: unknown current argument: $1" >&2
+                    exit 2
+                    ;;
+            esac
+        done
+
+        command_current "$CURRENT_VERBOSE"
         ;;
 
     use-direct)

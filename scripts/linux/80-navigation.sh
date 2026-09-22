@@ -48,6 +48,8 @@ DEFAULT_REQUEST_TIMEOUT="10s"
 
 REQUEST_TIMEOUT="$DEFAULT_REQUEST_TIMEOUT"
 FORCE_CACHE=0
+FORCE_LIVE=0
+VERBOSE=0
 
 INVENTORY_JSON=""
 INVENTORY_SOURCE=""
@@ -267,9 +269,14 @@ live_discover_inventory()
 
 discover_inventory()
 {
-    FORCE_CACHE="${1:-0}"
+    local force_cache="${1:-0}"
+    local force_live="${2:-0}"
 
-    if [ "$FORCE_CACHE" -ne 0 ]; then
+    if [ "$force_cache" -ne 0 ] && [ "$force_live" -ne 0 ]; then
+        kb_fail "--cached and --live are mutually exclusive"
+    fi
+
+    if [ "$force_cache" -ne 0 ]; then
         if load_cache; then
             INVENTORY_NOTE="cached inventory requested explicitly"
             return 0
@@ -280,6 +287,14 @@ discover_inventory()
 
     if live_discover_inventory; then
         return 0
+    fi
+
+    if [ "$force_live" -ne 0 ]; then
+        if [ -n "$LIVE_ERROR" ]; then
+            kb_fail "live namespace discovery failed for context '$KUBEBASE_CONTEXT': $LIVE_ERROR"
+        fi
+
+        kb_fail "live namespace discovery failed for context '$KUBEBASE_CONTEXT'"
     fi
 
     if load_cache; then
@@ -293,7 +308,6 @@ discover_inventory()
 
     kb_fail "namespace discovery failed and no valid cache exists for context '$KUBEBASE_CONTEXT'"
 }
-
 
 inventory_entry_for_name()
 {
@@ -441,6 +455,43 @@ inventory_group_count()
     ' <<< "$INVENTORY_JSON"
 }
 
+print_discovery_compact()
+{
+    local namespace_count
+    local source_text
+    local complete_text
+
+    namespace_count="$(inventory_namespace_count)"
+
+    if [ "$INVENTORY_SOURCE" = "live" ]; then
+        source_text="LIVE"
+    else
+        source_text="CACHE"
+    fi
+
+    if [ "$INVENTORY_COMPLETE" = "true" ]; then
+        complete_text="YES"
+    else
+        complete_text="NO"
+    fi
+
+    echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+    printf 'Source  : %s | verified: %s | complete: %s\n' \
+        "$source_text" \
+        "$namespace_count" \
+        "$complete_text"
+
+    if [ -n "${KUBEBASE_GROUP:-}" ]; then
+        echo "Group   : $KUBEBASE_GROUP (filter)"
+    fi
+
+    if [ "$INVENTORY_NOTE" = "live discovery failed; using last valid cache" ]; then
+        echo "Note    : live discovery failed; using cache"
+    fi
+
+    echo
+}
+
 print_discovery_summary()
 {
     local namespace_count
@@ -550,14 +601,20 @@ print_discovery_summary()
 
 print_inventory_header()
 {
-    echo "$PROJECT_NAME namespaces"
-    echo
-    echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
-    echo "Context : $KUBEBASE_CONTEXT"
-    echo
-    print_discovery_summary
-}
+    local title="$1"
 
+    echo "$PROJECT_NAME $title"
+    echo
+
+    if [ "$VERBOSE" -ne 0 ]; then
+        echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
+        echo "Context : $KUBEBASE_CONTEXT"
+        echo
+        print_discovery_summary
+    else
+        print_discovery_compact
+    fi
+}
 
 print_namespace_table()
 {
@@ -644,13 +701,6 @@ print_group_table()
     local count_value
     local -a rows=()
 
-    echo "$PROJECT_NAME groups"
-    echo
-    echo "Profile : $KUBEBASE_CLUSTER/$KUBEBASE_USER"
-    echo "Context : $KUBEBASE_CONTEXT"
-    echo
-    print_discovery_summary
-
     mapfile -t rows < <(
         jq -r '
             [
@@ -710,9 +760,9 @@ print_group_table()
 command_namespaces()
 {
     require_active_profile
-    discover_inventory "$FORCE_CACHE"
+    discover_inventory "$FORCE_CACHE" "$FORCE_LIVE"
 
-    print_inventory_header
+    print_inventory_header "namespaces"
     print_namespace_table
 }
 
@@ -720,8 +770,9 @@ command_namespaces()
 command_groups()
 {
     require_active_profile
-    discover_inventory "$FORCE_CACHE"
+    discover_inventory "$FORCE_CACHE" "$FORCE_LIVE"
 
+    print_inventory_header "groups"
     print_group_table
 }
 
@@ -737,7 +788,7 @@ select_namespace_interactively()
     local group_filter="${KUBEBASE_GROUP:-}"
     local -a names=()
 
-    discover_inventory 0
+    discover_inventory 0 0
 
     mapfile -t names < <(
         jq -r \
@@ -807,7 +858,7 @@ select_group_interactively()
     local index
     local -a groups=()
 
-    discover_inventory 0
+    discover_inventory 0 0
 
     mapfile -t groups < <(
         jq -r '
@@ -988,7 +1039,7 @@ command_emit_group()
     if [ -z "$selector" ]; then
         selector="$(select_group_interactively)" || return $?
     else
-        discover_inventory 0
+        discover_inventory 0 0
 
         inventory_group_exists "$selector" || {
             echo "ERROR: group '$selector' was not discovered for the active profile" >&2
@@ -1011,7 +1062,7 @@ command_direct_namespace()
     echo >&2
     echo "Run:" >&2
     echo >&2
-    echo "  eval \"\$(./kubebase.sh shell-init bash)\"" >&2
+    echo "  eval \"\$(./kubebase.sh shell init bash)\"" >&2
     return 2
 }
 
@@ -1022,7 +1073,7 @@ command_direct_group()
     echo >&2
     echo "Run:" >&2
     echo >&2
-    echo "  eval \"\$(./kubebase.sh shell-init bash)\"" >&2
+    echo "  eval \"\$(./kubebase.sh shell init bash)\"" >&2
     return 2
 }
 
@@ -1046,6 +1097,16 @@ case "$SUBCOMMAND" in
                     shift
                     ;;
 
+                --live)
+                    FORCE_LIVE=1
+                    shift
+                    ;;
+
+                --verbose)
+                    VERBOSE=1
+                    shift
+                    ;;
+
                 --request-timeout)
                     [ "$#" -ge 2 ] || {
                         echo "ERROR: --request-timeout requires a value" >&2
@@ -1059,10 +1120,15 @@ case "$SUBCOMMAND" in
                 -h|--help)
                     cat <<EOF_USAGE
 Usage:
-  kubebase $SUBCOMMAND [--cached] [--request-timeout DURATION]
+  kubebase $SUBCOMMAND [--cached|--live] [--verbose] [--request-timeout DURATION]
 
-Live discovery is the default. If live discovery fails, KubeBase uses the
-last valid cache automatically. --cached disables network discovery.
+Discovery modes:
+  default     Try the live Kubernetes API first, then use the latest valid
+              cache if live discovery fails.
+  --cached    Use cache only; do not access the Kubernetes API.
+  --live      Use the Kubernetes API only; do not fall back to cache.
+
+--verbose shows discovery and cache diagnostics.
 EOF_USAGE
                     exit 0
                     ;;
@@ -1073,6 +1139,11 @@ EOF_USAGE
                     ;;
             esac
         done
+
+        if [ "$FORCE_CACHE" -ne 0 ] && [ "$FORCE_LIVE" -ne 0 ]; then
+            echo "ERROR: --cached and --live are mutually exclusive" >&2
+            exit 2
+        fi
 
         if [ "$SUBCOMMAND" = "namespaces" ]; then
             command_namespaces
@@ -1112,9 +1183,9 @@ EOF_USAGE
 $PROJECT_NAME namespace/group navigation
 
 Usage:
-  kubebase namespaces [--cached]
+  kubebase namespaces [--cached|--live] [--verbose]
   kubebase ns [NAME|--clear]
-  kubebase groups [--cached]
+  kubebase groups [--cached|--live] [--verbose]
   kubebase group [GROUP|--clear]
 EOF_USAGE
         ;;

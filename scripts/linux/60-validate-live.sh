@@ -230,7 +230,7 @@ if ! "$USER_VALIDATOR" \
     --workspace-root "$WORKSPACE_ROOT" \
     >/dev/null
 then
-    kb_fail "local user validation failed; run 'kubebase validate-users' for details"
+    kb_fail "local user validation failed; run 'kubebase validate users' for details"
 fi
 
 

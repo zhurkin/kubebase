@@ -72,11 +72,11 @@ Initialize the workspace:
 ./kubebase.sh init
 ```
 
-Validate configuration:
+Validate configuration and tool sources:
 
 ```bash
-./kubebase.sh validate-config
-./kubebase.sh validate-sources --offline
+./kubebase.sh validate config
+./kubebase.sh validate sources --offline
 ```
 
 Download and install required tools:
@@ -86,33 +86,63 @@ Download and install required tools:
 ./kubebase.sh install
 ```
 
-Materialize cluster workspaces:
+Materialize cluster workspaces and validate users locally:
 
 ```bash
-./kubebase.sh materialize-clusters
+./kubebase.sh materialize
+./kubebase.sh validate users
 ```
 
-Validate users and kubeconfigs locally:
+Validate configured profiles against the Kubernetes API and refresh namespace inventory:
 
 ```bash
-./kubebase.sh validate-users
+./kubebase.sh validate live
 ```
 
-Validate configured profiles against the Kubernetes API and refresh the namespace cache:
+Initialize Bash integration in the current shell:
 
 ```bash
-./kubebase.sh validate-live
+eval "$(./kubebase.sh shell init bash)"
 ```
 
-Activate a profile and navigate namespaces/groups:
+The executable form emits shell code intentionally. After integration is loaded, running `kubebase shell init bash` reports that Bash integration is already active instead of printing the generated function body.
+
+For regular use, the same expression can be placed in `.bashrc` with the absolute path to the workspace entrypoint, for example:
 
 ```bash
-eval "$(./kubebase.sh shell-init bash)"
+eval "$(/home/user/kuber/kubebase-workspace/kubebase.sh shell init bash)"
+```
+
+Activate a profile and navigate:
+
+```bash
+kubebase profiles
 kubebase use my-cluster/default
+kubebase current
 kubebase namespaces
 kubebase groups
-kubebase ns stats-hydra-data
+kubebase ns my-namespace
 ```
+
+Commands that change shell state print a short result. Detailed diagnostics are available explicitly:
+
+```bash
+kubebase current --verbose
+kubebase namespaces --verbose
+kubebase groups --verbose
+```
+
+Namespace/group inventory has three discovery modes:
+
+```bash
+kubebase namespaces           # live first, cache fallback
+kubebase namespaces --cached  # cache only, no network
+kubebase namespaces --live    # live only, no cache fallback
+```
+
+The same discovery flags apply to `kubebase groups`.
+
+`kubebase ns` and `kubebase group` without an argument open an interactive selector when a TTY is available.
 
 ## Configuration model
 
