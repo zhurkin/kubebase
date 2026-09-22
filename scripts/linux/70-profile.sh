@@ -53,6 +53,7 @@ source "$LIB_DIR/workspace.sh"
 source "$LIB_DIR/profile.sh"
 source "$LIB_DIR/artifact-binary.sh"
 source "$LIB_DIR/active-session.sh"
+source "$LIB_DIR/oidc.sh"
 
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
@@ -98,6 +99,9 @@ PROFILE_CLUSTER_DIR=""
 PROFILE_TOOLCHAIN_DIR=""
 PROFILE_TOOLCHAIN_BIN=""
 PROFILE_TOOLCHAIN_MANIFEST=""
+PROFILE_KREW_ROOT=""
+PROFILE_AUTH_TYPE=""
+PROFILE_KUBECONFIG_AUTH_USER=""
 PROFILE_SOURCE_KUBECONFIG=""
 PROFILE_KUBECTL=""
 
@@ -450,6 +454,9 @@ reset_profile_state()
     PROFILE_TOOLCHAIN_DIR=""
     PROFILE_TOOLCHAIN_BIN=""
     PROFILE_TOOLCHAIN_MANIFEST=""
+    PROFILE_KREW_ROOT=""
+    PROFILE_AUTH_TYPE=""
+    PROFILE_KUBECONFIG_AUTH_USER=""
     PROFILE_SOURCE_KUBECONFIG=""
     PROFILE_KUBECTL=""
 }
@@ -474,6 +481,8 @@ resolve_profile()
     local tool_name
     local tool_version
     local command_name
+    local alias_name
+    local alias_path
     local command_path
     local expected_target
     local actual_target
@@ -577,7 +586,7 @@ resolve_profile()
         return 1
     fi
 
-    tool_count="$(jq -r '.tools | length' "$cluster_file")"
+    tool_count="$(jq -r '[.tools | to_entries[] | select(.value.enabled? != false)] | length' "$cluster_file")"
     command_count="$(jq -r '.commands | length' "$PROFILE_TOOLCHAIN_MANIFEST")"
 
     if [ "$tool_count" -ne "$command_count" ]; then
@@ -654,16 +663,71 @@ resolve_profile()
             return 1
         fi
 
+        while IFS= read -r alias_name; do
+            [ -n "$alias_name" ] || continue
+            alias_path="$PROFILE_TOOLCHAIN_BIN/$alias_name"
+
+            [ -L "$alias_path" ] || {
+                set_profile_error "cluster '$cluster_name' toolchain alias is not a managed symlink: $alias_name"
+                return 1
+            }
+
+            [ -x "$alias_path" ] || {
+                set_profile_error "cluster '$cluster_name' toolchain alias is not executable: $alias_name"
+                return 1
+            }
+
+            actual_target="$(readlink -- "$alias_path")"
+            if [ "$actual_target" != "$expected_target" ]; then
+                set_profile_error "cluster '$cluster_name' toolchain alias target changed: $alias_name"
+                return 1
+            fi
+
+            actual_sha256="$(sha256sum "$alias_path" | awk '{print $1}')"
+            actual_sha256="${actual_sha256,,}"
+            if [ "$actual_sha256" != "$expected_sha256" ]; then
+                set_profile_error "cluster '$cluster_name' toolchain alias failed SHA-256 verification: $alias_name"
+                return 1
+            fi
+        done < <(kb_tool_alias_names "$tool_name")
+
     done < <(
         jq -r '
             .tools
             | to_entries
+            | map(select(.value.enabled? != false))
             | sort_by(.key)
             | .[]
             | [ .key, .value.version ]
             | @tsv
         ' "$cluster_file"
     )
+
+    if jq -e '
+        (.tools.krew? | type) == "object"
+        and (.tools.krew.enabled? != false)
+    ' "$cluster_file" >/dev/null 2>&1; then
+        PROFILE_KREW_ROOT="$(
+            kb_krew_root_for_cluster \
+                "$WORKSPACE_DIR" \
+                "$cluster_name" \
+                "$HOST_PLATFORM"
+        )"
+    fi
+
+    PROFILE_AUTH_TYPE="$(kb_user_auth_type "$cluster_file" "$user_name")"
+
+    if [ "$PROFILE_AUTH_TYPE" = "oidc" ]; then
+        [ -n "$PROFILE_KREW_ROOT" ] || {
+            set_profile_error "cluster '$cluster_name' user '$user_name' OIDC authentication requires enabled Krew"
+            return 1
+        }
+
+        if [ ! -x "$(kb_oidc_plugin_path "$PROFILE_KREW_ROOT")" ]; then
+            set_profile_error "cluster '$cluster_name' user '$user_name' OIDC dependency oidc-login is not prepared; run: kubebase auth prepare"
+            return 1
+        fi
+    fi
 
     PROFILE_KUBECTL="$PROFILE_TOOLCHAIN_BIN/kubectl"
 
@@ -770,6 +834,8 @@ resolve_profile()
             "$PROFILE_CONTEXT"
     )"
 
+    PROFILE_KUBECONFIG_AUTH_USER="$context_user"
+
 
     PROFILE_CONTEXT_NAMESPACE="$(
         kb_profile_context_namespace \
@@ -873,6 +939,7 @@ create_profile_session()
     local session_dir
     local effective_kubeconfig
     local temp_kubeconfig
+    local temp_oidc_kubeconfig
     local session_manifest
     local cleanup_needed=1
 
@@ -881,6 +948,7 @@ create_profile_session()
     session_dir="$(mktemp -d "$SESSIONS_DIR/session.XXXXXX")"
     effective_kubeconfig="$session_dir/kubeconfig.yaml"
     temp_kubeconfig="$session_dir/.kubeconfig.yaml.tmp"
+    temp_oidc_kubeconfig="$session_dir/.kubeconfig.oidc.tmp"
     session_manifest="$session_dir/session.json"
 
     cleanup_new_session()
@@ -897,11 +965,26 @@ create_profile_session()
         config view \
         --raw \
         --flatten \
-        -o yaml \
+        -o json \
         > "$temp_kubeconfig"
     then
         echo "ERROR: failed to create flattened effective kubeconfig" >&2
         return 1
+    fi
+
+    if [ "$PROFILE_AUTH_TYPE" = "oidc" ]; then
+        if ! kb_oidc_overlay_kubeconfig_json \
+            "$PROFILE_CLUSTER_FILE" \
+            "$PROFILE_USER_NAME" \
+            "$PROFILE_KUBECONFIG_AUTH_USER" \
+            "$temp_kubeconfig" \
+            "$temp_oidc_kubeconfig"
+        then
+            echo "ERROR: failed to apply OIDC authentication to effective kubeconfig" >&2
+            return 1
+        fi
+
+        mv -f -- "$temp_oidc_kubeconfig" "$temp_kubeconfig"
     fi
 
     chmod 600 "$temp_kubeconfig"
@@ -937,7 +1020,9 @@ create_profile_session()
         --arg platform "$HOST_PLATFORM" \
         --arg sourceKubeconfig "$PROFILE_SOURCE_KUBECONFIG" \
         --arg effectiveKubeconfig "$effective_kubeconfig" \
-        --arg toolchain "$PROFILE_TOOLCHAIN_DIR" '
+        --arg toolchain "$PROFILE_TOOLCHAIN_DIR" \
+        --arg krewRoot "$PROFILE_KREW_ROOT" \
+        --arg authType "$PROFILE_AUTH_TYPE" '
         {
             schema: $schema,
             schemaVersion: $schemaVersion,
@@ -958,7 +1043,9 @@ create_profile_session()
                 namespace: (if $contextNamespace == "" then null else $contextNamespace end),
                 namespaceGroup: null
             },
-            toolchain: $toolchain
+            toolchain: $toolchain,
+            krewRoot: (if $krewRoot == "" then null else $krewRoot end),
+            authType: (if $authType == "" then null else $authType end)
         }
     ' > "$session_manifest"
 
@@ -1241,6 +1328,15 @@ command_emit_use()
     kb_shell_export "KUBEBASE_PLATFORM" "$HOST_PLATFORM"
     kb_shell_export "KUBEBASE_TOOLCHAIN" "$PROFILE_TOOLCHAIN_DIR"
     kb_shell_export "KUBEBASE_TOOLCHAIN_BIN" "$PROFILE_TOOLCHAIN_BIN"
+
+    if [ -n "$PROFILE_KREW_ROOT" ]; then
+        mkdir -p -- "$PROFILE_KREW_ROOT/bin"
+        chmod 700 "$PROFILE_KREW_ROOT"
+        kb_shell_export "KUBEBASE_KREW_ROOT" "$PROFILE_KREW_ROOT"
+    else
+        kb_shell_unset "KUBEBASE_KREW_ROOT"
+    fi
+
     kb_shell_export "KUBEBASE_SOURCE_KUBECONFIG" "$PROFILE_SOURCE_KUBECONFIG"
     kb_shell_export "KUBEBASE_EFFECTIVE_KUBECONFIG" "$PROFILE_EFFECTIVE_KUBECONFIG"
     kb_shell_export "KUBEBASE_SESSION_DIR" "$PROFILE_SESSION_DIR"
@@ -1441,6 +1537,14 @@ kubebase()
                     unset KUBEBASE_ORIGINAL_KUBECONFIG
                 fi
 
+                if [ -n "${KREW_ROOT+x}" ]; then
+                    export KUBEBASE_ORIGINAL_KREW_ROOT_SET=1
+                    export KUBEBASE_ORIGINAL_KREW_ROOT="$KREW_ROOT"
+                else
+                    export KUBEBASE_ORIGINAL_KREW_ROOT_SET=0
+                    unset KUBEBASE_ORIGINAL_KREW_ROOT
+                fi
+
                 __kb_baseline_created=1
             fi
 
@@ -1462,6 +1566,8 @@ kubebase()
                     unset KUBEBASE_ORIGINAL_PATH
                     unset KUBEBASE_ORIGINAL_KUBECONFIG_SET
                     unset KUBEBASE_ORIGINAL_KUBECONFIG
+                    unset KUBEBASE_ORIGINAL_KREW_ROOT_SET
+                    unset KUBEBASE_ORIGINAL_KREW_ROOT
                 fi
 
                 return "$__kb_status"
@@ -1472,7 +1578,17 @@ kubebase()
                 return 1
             fi
 
-            export PATH="$KUBEBASE_TOOLCHAIN_BIN:$KUBEBASE_ORIGINAL_PATH"
+            if [ -n "${KUBEBASE_KREW_ROOT:-}" ]; then
+                export KREW_ROOT="$KUBEBASE_KREW_ROOT"
+                export PATH="$KUBEBASE_TOOLCHAIN_BIN:$KUBEBASE_KREW_ROOT/bin:$KUBEBASE_ORIGINAL_PATH"
+            else
+                if [ "${KUBEBASE_ORIGINAL_KREW_ROOT_SET:-0}" = "1" ]; then
+                    export KREW_ROOT="${KUBEBASE_ORIGINAL_KREW_ROOT:-}"
+                else
+                    unset KREW_ROOT
+                fi
+                export PATH="$KUBEBASE_TOOLCHAIN_BIN:$KUBEBASE_ORIGINAL_PATH"
+            fi
 
             if [ -n "$__kb_old_session" ] && \
                [ "$__kb_old_session" != "$KUBEBASE_SESSION_DIR" ]; then
@@ -1607,6 +1723,12 @@ kubebase()
                 unset KUBECONFIG
             fi
 
+            if [ "${KUBEBASE_ORIGINAL_KREW_ROOT_SET:-0}" = "1" ]; then
+                export KREW_ROOT="${KUBEBASE_ORIGINAL_KREW_ROOT:-}"
+            else
+                unset KREW_ROOT
+            fi
+
             unset KUBEBASE_ACTIVE
             unset KUBEBASE_WORKSPACE
             unset KUBEBASE_CLUSTER
@@ -1616,6 +1738,7 @@ kubebase()
             unset KUBEBASE_PLATFORM
             unset KUBEBASE_TOOLCHAIN
             unset KUBEBASE_TOOLCHAIN_BIN
+            unset KUBEBASE_KREW_ROOT
             unset KUBEBASE_SOURCE_KUBECONFIG
             unset KUBEBASE_EFFECTIVE_KUBECONFIG
             unset KUBEBASE_SESSION_DIR
@@ -1639,6 +1762,8 @@ kubebase()
             unset KUBEBASE_ORIGINAL_PATH
             unset KUBEBASE_ORIGINAL_KUBECONFIG_SET
             unset KUBEBASE_ORIGINAL_KUBECONFIG
+            unset KUBEBASE_ORIGINAL_KREW_ROOT_SET
+            unset KUBEBASE_ORIGINAL_KREW_ROOT
 
             echo "KubeBase profile deactivated."
             ;;

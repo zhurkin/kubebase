@@ -89,6 +89,11 @@ Setup:
   materialize
       Materialize configured clusters, host toolchains and users.
 
+  auth prepare [--check]
+      Prepare authentication dependencies declared by user profiles.
+      OIDC profiles require the cluster Krew environment and oidc-login.
+      --check verifies readiness without changing Krew state or using network.
+
   validate users
       Validate materialized users and kubeconfigs locally.
 
@@ -138,6 +143,7 @@ Examples:
   $(basename "$0") fetch
   $(basename "$0") install
   $(basename "$0") materialize
+  $(basename "$0") auth prepare
   $(basename "$0") validate users
   $(basename "$0") validate live
   $(basename "$0") profiles
@@ -218,6 +224,32 @@ case "$COMMAND" in
     materialize)
         shift
         exec "$SCRIPTS_DIR/40-materialize-clusters.sh" "$@"
+        ;;
+
+    auth)
+        shift
+        AUTH_TARGET="${1:-}"
+
+        if [ -n "$AUTH_TARGET" ]; then
+            shift
+        fi
+
+        case "$AUTH_TARGET" in
+            prepare)
+                exec "$SCRIPTS_DIR/55-prepare-auth.sh" "$@"
+                ;;
+
+            "")
+                echo "ERROR: usage: $(basename "$0") auth prepare [--check] [options]" >&2
+                exit 2
+                ;;
+
+            *)
+                echo "ERROR: unknown auth command: $AUTH_TARGET" >&2
+                echo "Usage: $(basename "$0") auth prepare [--check] [options]" >&2
+                exit 2
+                ;;
+        esac
         ;;
 
     profiles)

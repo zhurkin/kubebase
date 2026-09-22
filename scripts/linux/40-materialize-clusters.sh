@@ -577,6 +577,7 @@ materialize_cluster_toolchain()
     local tool_name
     local tool_version
     local command_name
+    local alias_name
     local install_dir
     local link_path
     local link_target
@@ -699,10 +700,29 @@ materialize_cluster_toolchain()
 
         TOOLCHAIN_COMMANDS=$((TOOLCHAIN_COMMANDS + 1))
 
+        while IFS= read -r alias_name; do
+            [ -n "$alias_name" ] || continue
+
+            kb_safe_filename "$alias_name" || \
+                kb_fail \
+                    "invalid toolchain alias '$alias_name' for tool '$tool_name'"
+
+            if [ -n "${expected_commands[$alias_name]+x}" ]; then
+                kb_fail \
+                    "cluster '$cluster_name' maps multiple tools or aliases to command '$alias_name'"
+            fi
+
+            expected_commands["$alias_name"]=1
+            expected_targets["$alias_name"]="$link_target"
+            expected_order+=("$alias_name")
+            TOOLCHAIN_COMMANDS=$((TOOLCHAIN_COMMANDS + 1))
+        done < <(kb_tool_alias_names "$tool_name")
+
     done < <(
         jq -r '
             .tools
             | to_entries
+            | map(select(.value.enabled? != false))
             | sort_by(.key)
             | .[]
             | [

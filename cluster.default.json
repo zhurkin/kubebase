@@ -6,7 +6,12 @@
 
   "toolPlatforms": [],
 
-  "tools": {},
+  "tools": {
+    "kubectl": {
+      "version": "",
+      "enabled": true
+    }
+  },
 
   "users": {}
 }

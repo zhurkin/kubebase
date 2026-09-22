@@ -20,6 +20,10 @@ if ! declare -F kb_artifact_binary_sha256 >/dev/null 2>&1; then
     source "$_KB_ACTIVE_SESSION_LIB_DIR/artifact-binary.sh"
 fi
 
+if ! declare -F kb_user_auth_type >/dev/null 2>&1; then
+    source "$_KB_ACTIVE_SESSION_LIB_DIR/oidc.sh"
+fi
+
 unset _KB_ACTIVE_SESSION_LIB_DIR
 
 KB_ACTIVE_SESSION_SCHEMA="kubebase.session"
@@ -58,11 +62,14 @@ kb_verify_active_session_kubectl()
     local source_kubeconfig="${KUBEBASE_SOURCE_KUBECONFIG:-}"
     local effective_kubeconfig="${KUBEBASE_EFFECTIVE_KUBECONFIG:-}"
     local session_dir="${KUBEBASE_SESSION_DIR:-}"
+    local krew_root="${KUBEBASE_KREW_ROOT:-}"
 
     local cluster_dir
     local cluster_file
     local expected_toolchain
     local expected_toolchain_bin
+    local expected_krew_root=""
+    local expected_auth_type=""
     local session_manifest
     local sessions_dir
     local session_parent
@@ -157,7 +164,9 @@ kb_verify_active_session_kubectl()
         --arg platform "$platform" \
         --arg sourceKubeconfig "$source_kubeconfig" \
         --arg effectiveKubeconfig "$effective_kubeconfig" \
-        --arg toolchain "$toolchain" '
+        --arg toolchain "$toolchain" \
+        --arg krewRoot "$krew_root" \
+        --arg authType "$(jq -r --arg user "$user" '.users[$user].auth.type // ""' "$cluster_file" 2>/dev/null || true)" '
         .schema == $schema
         and .schemaVersion == $version
         and .workspace == $workspace
@@ -168,6 +177,8 @@ kb_verify_active_session_kubectl()
         and .kubeconfig.source == $sourceKubeconfig
         and .kubeconfig.effective == $effectiveKubeconfig
         and .toolchain == $toolchain
+        and ((.krewRoot // "") == $krewRoot)
+        and ((.authType // "") == $authType)
     ' "$session_manifest" >/dev/null 2>&1 || { kb_active_session_error "active KubeBase session metadata does not match the shell profile"; return 1; }
 
     [ -f "$cluster_file" ] && [ -r "$cluster_file" ] || { kb_active_session_error "active cluster definition is missing: $cluster_file"; return 1; }
@@ -182,7 +193,25 @@ kb_verify_active_session_kubectl()
         and .name == $cluster
         and (.toolPlatforms | index($platform) != null)
         and (.tools.kubectl.version | type) == "string"
+        and (.tools.kubectl.enabled? != false)
     ' "$cluster_file" >/dev/null 2>&1 || { kb_active_session_error "active cluster definition is invalid"; return 1; }
+
+    if jq -e '
+        (.tools.krew? | type) == "object"
+        and (.tools.krew.enabled? != false)
+    ' "$cluster_file" >/dev/null 2>&1; then
+        expected_krew_root="$(kb_krew_root_for_cluster "$workspace" "$cluster" "$platform")"
+        [ "$krew_root" = "$expected_krew_root" ] || { kb_active_session_error "active Krew root does not match the selected cluster/platform"; return 1; }
+        [ "${KREW_ROOT:-}" = "$expected_krew_root" ] || { kb_active_session_error "KREW_ROOT no longer matches the active KubeBase profile"; return 1; }
+    else
+        [ -z "$krew_root" ] || { kb_active_session_error "active profile unexpectedly declares a Krew root"; return 1; }
+    fi
+
+    expected_auth_type="$(kb_user_auth_type "$cluster_file" "$user")"
+    if [ "$expected_auth_type" = "oidc" ]; then
+        [ -n "$expected_krew_root" ] || { kb_active_session_error "OIDC profile has no active Krew root"; return 1; }
+        [ -x "$(kb_oidc_plugin_path "$expected_krew_root")" ] || { kb_active_session_error "OIDC dependency oidc-login is missing from the active Krew environment"; return 1; }
+    fi
 
     kubectl_version="$(jq -r '.tools.kubectl.version' "$cluster_file")"
     kb_safe_name "$kubectl_version" || { kb_active_session_error "active cluster declares an unsafe kubectl version"; return 1; }

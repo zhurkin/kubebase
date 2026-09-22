@@ -54,6 +54,7 @@ LIB_DIR="$SCRIPT_DIR/lib"
 source "$LIB_DIR/common.sh"
 source "$LIB_DIR/workspace.sh"
 source "$LIB_DIR/namespace-inventory.sh"
+source "$LIB_DIR/oidc.sh"
 
 REPO_ROOT="$(
     cd -- "$SCRIPT_DIR/../.."
@@ -205,7 +206,7 @@ verify_materialized_kubectl()
     local manifest_sha256
     local actual_command_sha256
 
-    kubectl_version="$(jq -r '.tools.kubectl.version // empty' "$cluster_file")"
+    kubectl_version="$(jq -r 'if (.tools.kubectl.enabled? != false) then (.tools.kubectl.version // empty) else empty end' "$cluster_file")"
     [ -n "$kubectl_version" ] || return 1
 
     install_dir="$WORKSPACE_DIR/tools/$platform/kubectl/$kubectl_version"
@@ -420,6 +421,16 @@ echo "Platform   : $HOST_PLATFORM"
 echo "Network    : enabled (read-only)"
 
 
+LIVE_BASE_PATH="$PATH"
+if [ -n "${KREW_ROOT+x}" ]; then
+    LIVE_BASE_KREW_ROOT_SET=1
+    LIVE_BASE_KREW_ROOT="$KREW_ROOT"
+else
+    LIVE_BASE_KREW_ROOT_SET=0
+    LIVE_BASE_KREW_ROOT=""
+fi
+
+
 # ----------------------------------------------------------------------
 # Profiles
 # ----------------------------------------------------------------------
@@ -440,6 +451,30 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
     KUBECTL_BIN="$VERIFIED_LIVE_KUBECTL"
 
+    # Exec credential plugins such as kubectl oidc-login are discovered via
+    # PATH. When Krew is enabled for this cluster, validate live must use the
+    # same cluster-scoped KREW_ROOT and plugin PATH as an activated profile.
+    if jq -e '
+        (.tools.krew? | type) == "object"
+        and (.tools.krew.enabled? != false)
+    ' "$CLUSTER_FILE" >/dev/null 2>&1; then
+        CLUSTER_KREW_ROOT="$(
+            kb_krew_root_for_cluster \
+                "$WORKSPACE_DIR" \
+                "$CLUSTER_NAME" \
+                "$HOST_PLATFORM"
+        )"
+        export KREW_ROOT="$CLUSTER_KREW_ROOT"
+        export PATH="$CLUSTER_DIR/toolchains/$HOST_PLATFORM/bin:$CLUSTER_KREW_ROOT/bin:$LIVE_BASE_PATH"
+    else
+        if [ "$LIVE_BASE_KREW_ROOT_SET" -eq 1 ]; then
+            export KREW_ROOT="$LIVE_BASE_KREW_ROOT"
+        else
+            unset KREW_ROOT
+        fi
+        export PATH="$LIVE_BASE_PATH"
+    fi
+
     mapfile -t USER_NAMES < <(jq -r '.users | keys[]' "$CLUSTER_FILE")
 
     for USER_NAME in "${USER_NAMES[@]}"; do
@@ -453,6 +488,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
             jq -r --arg user "$USER_NAME" '.users[$user].context // ""' "$CLUSTER_FILE"
         )"
         KUBECONFIG_FILE="$CLUSTER_DIR/users/$USER_NAME/$KUBECONFIG_REL"
+        LIVE_KUBECONFIG_FILE="$KUBECONFIG_FILE"
 
         echo
         echo "Profile : $CLUSTER_NAME/$USER_NAME"
@@ -480,13 +516,77 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         echo "  context    : $SELECTED_CONTEXT"
         echo "  selection  : $CONTEXT_SELECTION"
 
+        if kb_user_uses_oidc "$CLUSTER_FILE" "$USER_NAME"; then
+            OIDC_PLUGIN="$(kb_oidc_plugin_path "$CLUSTER_KREW_ROOT")"
+
+            if [ ! -x "$OIDC_PLUGIN" ]; then
+                record_error "profile '$CLUSTER_NAME/$USER_NAME': OIDC dependency oidc-login is not prepared; run: kubebase auth prepare"
+                FAILED=$((FAILED + 1))
+                printf '  %-36s : %s\n' "Status" "FAILED"
+                continue
+            fi
+
+            LIVE_FLAT_JSON="$TEMP_DIR/${CLUSTER_NAME}.${USER_NAME}.flat.json"
+            LIVE_OIDC_JSON="$TEMP_DIR/${CLUSTER_NAME}.${USER_NAME}.oidc.json"
+
+            if ! "$KUBECTL_BIN" \
+                --kubeconfig "$KUBECONFIG_FILE" \
+                config view \
+                --raw \
+                --flatten \
+                -o json \
+                > "$LIVE_FLAT_JSON"
+            then
+                record_error "profile '$CLUSTER_NAME/$USER_NAME': failed to flatten kubeconfig for OIDC validation"
+                FAILED=$((FAILED + 1))
+                printf '  %-36s : %s\n' "Status" "FAILED"
+                continue
+            fi
+
+            LIVE_CONTEXT_USER="$(
+                jq -r \
+                    --arg context "$SELECTED_CONTEXT" '
+                    [
+                        .contexts[]
+                        | select(.name == $context)
+                        | .context.user // ""
+                    ]
+                    | if length == 1 then .[0] else "" end
+                ' "$LIVE_FLAT_JSON"
+            )"
+
+            if [ -z "$LIVE_CONTEXT_USER" ]; then
+                record_error "profile '$CLUSTER_NAME/$USER_NAME': selected context has no unique auth user for OIDC overlay"
+                FAILED=$((FAILED + 1))
+                printf '  %-36s : %s\n' "Status" "FAILED"
+                continue
+            fi
+
+            if ! kb_oidc_overlay_kubeconfig_json \
+                "$CLUSTER_FILE" \
+                "$USER_NAME" \
+                "$LIVE_CONTEXT_USER" \
+                "$LIVE_FLAT_JSON" \
+                "$LIVE_OIDC_JSON"
+            then
+                record_error "profile '$CLUSTER_NAME/$USER_NAME': failed to build OIDC effective kubeconfig"
+                FAILED=$((FAILED + 1))
+                printf '  %-36s : %s\n' "Status" "FAILED"
+                continue
+            fi
+
+            chmod 600 "$LIVE_OIDC_JSON"
+            LIVE_KUBECONFIG_FILE="$LIVE_OIDC_JSON"
+            echo "  auth       : oidc (effective overlay)"
+        fi
+
         # Namespace discovery itself is the live API/authentication probe.
         # This avoids relying on non-resource endpoints such as /version or
         # /api, which API gateways or Kubernetes RBAC may deny even when normal
         # namespaced API access is fully usable.
         if discover_namespace_inventory \
             "$KUBECTL_BIN" \
-            "$KUBECONFIG_FILE" \
+            "$LIVE_KUBECONFIG_FILE" \
             "$SELECTED_CONTEXT" \
             "$CLUSTER_NAME" \
             "$USER_NAME"
@@ -495,7 +595,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
             API_GIT_VERSION="$(
                 "$KUBECTL_BIN" \
-                    --kubeconfig "$KUBECONFIG_FILE" \
+                    --kubeconfig "$LIVE_KUBECONFIG_FILE" \
                     --context "$SELECTED_CONTEXT" \
                     --request-timeout="$REQUEST_TIMEOUT" \
                     get --raw=/version \
@@ -622,6 +722,13 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
         fi
     done
 done
+
+export PATH="$LIVE_BASE_PATH"
+if [ "$LIVE_BASE_KREW_ROOT_SET" -eq 1 ]; then
+    export KREW_ROOT="$LIVE_BASE_KREW_ROOT"
+else
+    unset KREW_ROOT
+fi
 
 
 # ----------------------------------------------------------------------

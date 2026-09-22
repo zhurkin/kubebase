@@ -620,7 +620,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
     # ------------------------------------------------------------------
 
     KUBECTL_VERSION="$(
-        jq -r '.tools.kubectl.version // ""' "$CLUSTER_FILE"
+        jq -r 'if (.tools.kubectl.enabled? != false) then (.tools.kubectl.version // "") else "" end' "$CLUSTER_FILE"
     )"
 
     KUBECTL_READY=0

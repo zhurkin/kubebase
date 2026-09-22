@@ -617,7 +617,8 @@ CONFIG_DIR="$(
 mkdir -p \
     "$WORKSPACE_DIR/artifacts" \
     "$WORKSPACE_DIR/tools" \
-    "$WORKSPACE_DIR/clusters"
+    "$WORKSPACE_DIR/clusters" \
+    "$WORKSPACE_DIR/krew"
 
 
 # ----------------------------------------------------------------------
@@ -722,6 +723,7 @@ echo "Directories:"
 echo "  artifacts : $WORKSPACE_DIR/artifacts"
 echo "  tools     : $WORKSPACE_DIR/tools"
 echo "  clusters  : $WORKSPACE_DIR/clusters"
+echo "  krew      : $WORKSPACE_DIR/krew"
 
 echo
 echo "Initialization complete."

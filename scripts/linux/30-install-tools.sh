@@ -1101,6 +1101,7 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
             .tools
             | to_entries[]
+            | select(.value.enabled? != false)
 
             |
 

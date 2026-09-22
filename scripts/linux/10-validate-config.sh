@@ -130,7 +130,7 @@ cluster_unsupported_fields()
                     .tools
                     | to_entries[]?
                     | . as $tool
-                    | (($tool.value | keys) - ["version"])[]?
+                    | (($tool.value | keys) - ["enabled", "version"])[]?
                     | "tools.\($tool.key)." + .
                 else
                     empty
@@ -141,8 +141,20 @@ cluster_unsupported_fields()
                     .users
                     | to_entries[]?
                     | . as $user
-                    | (($user.value | keys) - ["context", "kubeconfig"])[]?
+                    | (($user.value | keys) - ["auth", "context", "kubeconfig"])[]?
                     | "users.\($user.key)." + .
+                else
+                    empty
+                end
+            ),
+            (
+                if (.users | type) == "object" then
+                    .users
+                    | to_entries[]?
+                    | select((.value.auth? | type) == "object")
+                    | . as $user
+                    | (($user.value.auth | keys) - ["clientId", "grantType", "issuerUrl", "type"])[]?
+                    | "users.\($user.key).auth." + .
                 else
                     empty
                 end
@@ -219,7 +231,9 @@ validate_cluster_structure()
             and
             (.value | type) == "object"
             and
-            (((.value | keys) - ["version"]) | length == 0)
+            (((.value | keys) - ["enabled", "version"]) | length == 0)
+            and
+            ((.value | has("enabled") | not) or (.value.enabled | type) == "boolean")
             and
             (.value.version | safe_version)
         )
@@ -228,6 +242,15 @@ validate_cluster_structure()
 
         (.users | type) == "object"
         and
+        (
+            (.users | length) == 0
+            or
+            (
+                (.tools.kubectl? | type) == "object"
+                and (.tools.kubectl.enabled? != false)
+            )
+        )
+        and
         all(
             (.users | to_entries[]);
 
@@ -235,7 +258,7 @@ validate_cluster_structure()
             and
             (.value | type) == "object"
             and
-            (((.value | keys) - ["context", "kubeconfig"]) | length == 0)
+            (((.value | keys) - ["auth", "context", "kubeconfig"]) | length == 0)
             and
             (.value.kubeconfig | safe_relative_path)
 
@@ -245,6 +268,46 @@ validate_cluster_structure()
                 (.value | has("context") | not)
                 or
                 (.value.context | nonempty_string)
+            )
+
+            and
+
+            (
+                (.value | has("auth") | not)
+                or
+                (
+                    (.value.auth | type) == "object"
+                    and
+                    (((.value.auth | keys) - ["clientId", "grantType", "issuerUrl", "type"]) | length == 0)
+                    and
+                    .value.auth.type == "oidc"
+                    and
+                    (.value.auth.issuerUrl | nonempty_string)
+                    and
+                    (.value.auth.issuerUrl | test("[\\n\\r\\t]") | not)
+                    and
+                    (.value.auth.clientId | nonempty_string)
+                    and
+                    (.value.auth.clientId | test("[\\n\\r\\t]") | not)
+                    and
+                    (
+                        (.value.auth | has("grantType") | not)
+                        or
+                        (.value.auth.grantType == "authcode" or .value.auth.grantType == "device-code")
+                    )
+                )
+            )
+        )
+
+        and
+
+        (
+            ([.users[] | select(.auth?.type == "oidc")] | length) == 0
+            or
+            (
+                (.tools.krew? | type) == "object"
+                and
+                (.tools.krew.enabled? != false)
             )
         )
 
@@ -539,6 +602,27 @@ for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
 
                 validation_error \
                     "$CONFIG_FILE: unsupported kubebase.cluster field(s): $UNSUPPORTED_FIELDS"
+
+                continue
+
+            fi
+
+
+            if jq -e '
+                (.users | type) == "object"
+                and
+                ([.users[] | select(.auth?.type == "oidc")] | length) > 0
+                and
+                (
+                    (.tools.krew? | type) != "object"
+                    or
+                    (.tools.krew.enabled? == false)
+                )
+            ' "$CONFIG_FILE" >/dev/null 2>&1
+            then
+
+                validation_error \
+                    "$CONFIG_FILE: OIDC authentication requires tools.krew to be configured and enabled"
 
                 continue
 

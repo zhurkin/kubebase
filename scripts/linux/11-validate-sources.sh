@@ -1208,7 +1208,9 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
 
         jq -r '
             .tools
-            | keys[]
+            | to_entries[]
+            | select(.value.enabled? != false)
+            | .key
         ' "$CLUSTER_FILE"
 
     )
