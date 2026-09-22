@@ -31,9 +31,6 @@ PROJECT_NAME="KubeBase"
 CLUSTER_SCHEMA="kubebase.cluster"
 CLUSTER_SCHEMA_VERSION=1
 
-INVENTORY_SCHEMA="kubebase.namespaceInventory"
-INVENTORY_SCHEMA_VERSION=2
-
 DEFAULT_WORKSPACE_NAME="kubebase-workspace"
 DEFAULT_REQUEST_TIMEOUT="10s"
 
@@ -175,8 +172,7 @@ discover_namespace_inventory()
 
 write_inventory_cache()
 {
-    kb_namespace_cache_v2_write "$@"
-    printf '%s\n' "$KB_NAMESPACE_CACHE_FILE"
+    kb_namespace_cache_v3_write "$@"
 }
 
 
@@ -363,17 +359,19 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
                 jq -r '.gitVersion // empty' 2>/dev/null || true
             )"
 
-            CACHE_FILE="$(
-                write_inventory_cache \
-                    "$WORKSPACE_DIR" \
-                    "$CLUSTER_NAME" \
-                    "$USER_NAME" \
-                    "$DISCOVERY_JSON"
-            )"
+            write_inventory_cache \
+                "$WORKSPACE_DIR" \
+                "$CLUSTER_NAME" \
+                "$USER_NAME" \
+                "$SELECTED_CONTEXT" \
+                "$DISCOVERY_JSON"
+
+            CACHE_FILE="$KB_NAMESPACE_CACHE_FILE"
+            CACHE_SNAPSHOT_FILE="$KB_NAMESPACE_CACHE_SNAPSHOT_FILE"
 
             NS_COUNT="$(jq '.entries | length' <<< "$DISCOVERY_JSON")"
             GROUP_COUNT="$(
-                jq '[.entries[].groupId | select(. != null and . != "")] | unique | length' \
+                jq '[.entries[].group | select(. != null) | [.kind, .id]] | unique | length' \
                     <<< "$DISCOVERY_JSON"
             )"
 
@@ -426,7 +424,8 @@ for CLUSTER_FILE in "${CLUSTER_FILES[@]}"; do
             echo
             echo "  Cache:"
             printf '    %-34s : %s\n' "Updated" "YES"
-            printf '    %-34s : %s\n' "File" "$CACHE_FILE"
+            printf '    %-34s : %s\n' "Latest" "$CACHE_FILE"
+            printf '    %-34s : %s\n' "Snapshot" "$CACHE_SNAPSHOT_FILE"
 
             echo
             printf '  %-36s : %s\n' "Status" "READY"

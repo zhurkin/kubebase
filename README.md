@@ -60,8 +60,9 @@ KubeBase currently supports:
 - local kubeconfig validation;
 - multiple kubeconfig contexts with explicit context selection;
 - live Kubernetes API validation;
-- best-effort namespace discovery with cache fallback;
-- optional namespace grouping derived from namespace metadata when available.
+- best-effort namespace discovery with context-specific cache fallback;
+- separate latest, complete, and partial namespace inventory snapshots;
+- optional typed namespace grouping derived from namespace metadata when available.
 
 ## Basic usage
 
@@ -124,7 +125,9 @@ A kubeconfig may contain multiple Kubernetes contexts and endpoints. KubeBase ca
 
 The original kubeconfig is never modified when selecting a context.
 
-Namespace groups are optional KubeBase navigation metadata, not a Kubernetes core resource. A cluster may expose no groups at all; in that case namespace discovery and navigation continue to work normally.
+Namespace groups are optional KubeBase navigation metadata, not a Kubernetes core resource. A cluster may expose no groups at all; in that case namespace discovery and navigation continue to work normally. Rancher project metadata is represented as a typed `rancher-project` group rather than treating every group as a Rancher project.
+
+Namespace inventory cache is scoped by cluster, user, and Kubernetes context. KubeBase keeps the latest discovery separately from the last complete and last partial snapshots. A partial refresh never destroys the last complete snapshot; an older complete snapshot is historical information and is not treated as proof of current access.
 
 ## Security
 
